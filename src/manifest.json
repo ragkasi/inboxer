@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Inbox Group & Mass-Delete",
+  "version": "1.0.0",
+  "description": "Group your emails by sender/company for quick mass-deletion.",
+  "permissions": [
+    "storage",
+    "identity",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "https://outlook.office.com/*",
+    "https://www.googleapis.com/*",
+    "https://graph.microsoft.com/*",
+    "https://login.microsoftonline.com/*"
+  ],
+  "background": {
+    "service_worker": "background.bundle.js"
+  },
+  "content_scripts": [{
+    "matches": [
+      "https://mail.google.com/*",
+      "https://outlook.office.com/*"
+    ],
+    "js": ["content.bundle.js"],
+    "run_at": "document_idle"
+  }],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Email Cleaner",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "oauth2": {
+    "client_id": "${GOOGLE_CLIENT_ID}",
+    "scopes": [
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/gmail.readonly"
+    ]
+  },
+  "key": "${EXTENSION_KEY}"
+}
