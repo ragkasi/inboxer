@@ -41,6 +41,5 @@
       "https://www.googleapis.com/auth/gmail.modify",
       "https://www.googleapis.com/auth/gmail.readonly"
     ]
-  },
-  "key": "${EXTENSION_KEY}"
+  }
 }
