@@ -1,5 +1,5 @@
 // Content script to interact with email pages
-console.log("Email Cleaner Content Script v1.0.1 loaded (extension popup mode)");
+console.log("Email Cleaner Content Script v1.0.2 loaded (extension popup mode)");
 const isGmail = window.location.hostname === 'mail.google.com';
 const isOutlook = window.location.hostname === 'outlook.office.com';
 
@@ -103,7 +103,37 @@ function createNotification(message, duration = 8000) {
 function isChromeAPIAvailable() {
   return typeof chrome !== 'undefined' && 
          typeof chrome.runtime !== 'undefined' && 
-         typeof chrome.runtime.sendMessage === 'function';
+         typeof chrome.runtime.sendMessage === 'function' &&
+         chrome.runtime.id; // This will be undefined if the extension context is invalid
+}
+
+// Helper to wait for Chrome API to be available
+function waitForChromeAPI(maxWaitTimeMs = 5000, intervalMs = 200) {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
+    
+    // First check immediately
+    if (isChromeAPIAvailable()) {
+      return resolve(true);
+    }
+    
+    // If not immediately available, start checking with intervals
+    const checkInterval = setInterval(() => {
+      // Check if we've timed out
+      if (Date.now() - startTime > maxWaitTimeMs) {
+        clearInterval(checkInterval);
+        console.error("🔍 [ContentScript] Chrome API not available after timeout");
+        return reject(new Error("Chrome API not available after timeout"));
+      }
+      
+      // Check if API is now available
+      if (isChromeAPIAvailable()) {
+        clearInterval(checkInterval);
+        console.log("🔍 [ContentScript] Chrome API now available");
+        return resolve(true);
+      }
+    }, intervalMs);
+  });
 }
 
 // Show an error notification if the extension API isn't available
@@ -120,36 +150,22 @@ function openExtensionPopup() {
   
   // Check if Chrome API is available
   if (!isChromeAPIAvailable()) {
-    console.error("🔍 [ContentScript] Chrome API not available!");
+    console.warn("🔍 [ContentScript] Chrome API not immediately available, waiting...");
     
-    // Try again after a short delay (retry mechanism)
-    let retryCount = 0;
-    const maxRetries = 3;
-    
-    const retryWithBackoff = () => {
-      retryCount++;
-      const delay = 1000 * retryCount; // Increasing delay: 1s, 2s, 3s
-      
-      console.log(`🔍 [ContentScript] Will retry in ${delay}ms (attempt ${retryCount}/${maxRetries})...`);
-      
-      setTimeout(() => {
-        if (isChromeAPIAvailable()) {
-          console.log(`🔍 [ContentScript] Chrome API is now available after retry ${retryCount}`);
-          attemptToOpenPopup();
-        } else if (retryCount < maxRetries) {
-          retryWithBackoff();
-        } else {
-          console.error("🔍 [ContentScript] Chrome API still not available after maximum retries");
-          showAPIUnavailableError();
-        }
-      }, delay);
-    };
-    
-    retryWithBackoff();
+    // Wait for API to become available with timeout
+    waitForChromeAPI(5000)
+      .then(() => {
+        console.log("🔍 [ContentScript] Chrome API now available, proceeding to open popup");
+        attemptToOpenPopup();
+      })
+      .catch(error => {
+        console.error("🔍 [ContentScript] Chrome API still not available:", error);
+        showAPIUnavailableError();
+      });
     return;
   }
   
-  // If API is available, proceed with opening the popup
+  // If API is immediately available, proceed with opening the popup
   attemptToOpenPopup();
 }
 

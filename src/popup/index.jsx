@@ -183,7 +183,65 @@ function PopupApp() {
           {groups.map(group => (
             <div key={group.sender} className="email-group">
               <h3>{group.sender} ({group.count})</h3>
-              <button onClick={() => {/* TODO: Delete action */}}>Delete All</button>
+              <button onClick={() => {
+                console.log(`Deleting all emails from ${group.sender}`, group);
+                // Set a loading state for this specific group
+                setErrorMsg(`Deleting emails from ${group.sender}...`);
+                
+                // Get message IDs for this group
+                let messageIds = [];
+                
+                if (group.emails && Array.isArray(group.emails)) {
+                  // Extract message IDs based on thread/email structure
+                  messageIds = group.emails.flatMap(email => {
+                    // If it's a thread with messages array
+                    if (email.messages && Array.isArray(email.messages)) {
+                      return email.messages.map(message => message.id);
+                    }
+                    // If it has a direct id property
+                    else if (email.id) {
+                      return [email.id];
+                    }
+                    return [];
+                  });
+                }
+                
+                if (messageIds.length === 0) {
+                  setErrorMsg(`Error: Could not find message IDs for ${group.sender}`);
+                  return;
+                }
+                
+                console.log(`Deleting ${messageIds.length} messages from ${group.sender}`);
+                
+                // Send delete request to background script
+                sendMessage({ 
+                  type: "CLEAN_EMAILS", 
+                  service: "gmail", 
+                  messageIds: messageIds 
+                })
+                .then(response => {
+                  console.log("Delete response:", response);
+                  if (response.success) {
+                    setErrorMsg(`Successfully deleted ${response.count} emails from ${group.sender}`);
+                    // Refresh the email list
+                    dispatch(fetchEmails(safeFetchEmails("gmail")));
+                    
+                    // Clear message after a few seconds
+                    setTimeout(() => {
+                      if (errorMsg.includes(group.sender)) {
+                        setErrorMsg('');
+                      }
+                    }, 3000);
+                  } else {
+                    // Show error message
+                    setErrorMsg(`Error deleting emails: ${response.error || 'Unknown error'}`);
+                  }
+                })
+                .catch(err => {
+                  console.error("Delete error:", err);
+                  setErrorMsg(`Error deleting emails: ${err.message || String(err)}`);
+                });
+              }}>Delete All</button>
             </div>
           ))}
         </div>

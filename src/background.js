@@ -353,43 +353,56 @@ async function handleMessageAsync(request, sender, sendResponse) {
           });
           console.log('[OPEN_POPUP] 2. Storage set. Setting popup URL...');
           
-          chrome.action.setPopup({ popup: 'popup.html' }, async () => {
-            const error = logRuntimeError('setPopup');
-            if (error) {
-              console.error('[OPEN_POPUP] 3a. Error setting popup:', error);
-              // Try to send error response even if setPopup failed
-              try { 
-                sendResponse({ status: 'error', error: 'Failed to set popup: ' + error });
-              } catch(e) { console.error('Failed to send error response after setPopup error', e); }
-              return;
-            }
-            
-            console.log('[OPEN_POPUP] 3b. Popup URL set successfully. Attempting programmatic open...');
-            
-            try {
-              if (chrome.action && chrome.action.openPopup) {
-                await chrome.action.openPopup();
-                console.log('[OPEN_POPUP] 4a. chrome.action.openPopup() called.');
+          // Ensure popup is set correctly
+          await new Promise((resolve, reject) => {
+            chrome.action.setPopup({ popup: 'popup.html' }, () => {
+              const error = logRuntimeError('setPopup');
+              if (error) {
+                console.error('[OPEN_POPUP] 3a. Error setting popup:', error);
+                reject(error);
               } else {
-                console.log('[OPEN_POPUP] 4b. chrome.action.openPopup() not available');
+                console.log('[OPEN_POPUP] 3b. Popup URL set successfully.');
+                resolve();
               }
-            } catch (openError) {
-              console.log('[OPEN_POPUP] 4c. chrome.action.openPopup() threw an error (ignored):', openError);
+            });
+          });
+          
+          console.log('[OPEN_POPUP] 4. Attempting programmatic open...');
+          
+          try {
+            // Attempt multiple techniques to open the popup
+            
+            // Technique 1: Use chrome.action.openPopup if available
+            if (chrome.action && typeof chrome.action.openPopup === 'function') {
+              try {
+                await chrome.action.openPopup();
+                console.log('[OPEN_POPUP] 4a. chrome.action.openPopup() called successfully.');
+              } catch (popupError) {
+                console.log('[OPEN_POPUP] 4b. chrome.action.openPopup() threw an error:', popupError);
+                // Continue to other techniques
+              }
+            } else {
+              console.log('[OPEN_POPUP] 4c. chrome.action.openPopup() not available');
             }
             
-            console.log('[OPEN_POPUP] 5. Sending warning response...');
-            try {
-              sendResponse({ 
-                status: 'warning', 
-                message: 'Please click the extension icon in the toolbar',
-                success: true,
-                reason: 'Programmatic popup opening is unreliable'
-              });
-              console.log('[OPEN_POPUP] 6. Warning response sent.');
-            } catch (sendErr) {
-              console.error('[OPEN_POPUP] Error sending warning response:', sendErr);
-            }
-          });
+            // Regardless of whether the programmatic popup worked, send a success response
+            // because our content script will detect if it didn't work and show a message
+            console.log('[OPEN_POPUP] 5. Sending success response...');
+            sendResponse({ 
+              status: 'success', 
+              message: 'Popup opening initiated',
+              success: true
+            });
+          } catch (openError) {
+            console.error('[OPEN_POPUP] Error opening popup:', openError);
+            // Send warning response if we can't open programmatically
+            sendResponse({ 
+              status: 'warning', 
+              message: 'Please click the extension icon in the toolbar',
+              success: true,
+              reason: 'Programmatic popup opening failed: ' + (openError.message || 'unknown error')
+            });
+          }
           
           return true; // Indicate async response
         } catch (error) {
@@ -398,10 +411,7 @@ async function handleMessageAsync(request, sender, sendResponse) {
           try {
              sendResponse({ status: 'error', error: 'Exception in OPEN_POPUP handler: ' + serializeError(error) });
           } catch(e) { console.error('Failed to send error response after exception', e); }
-          return false;
-          console.error('[OPEN_POPUP] Exception:', error);
-          sendResponse({ status: 'error', error: serializeError(error) });
-          return false; // No async handling after error
+          return true; // Maintain async response
         }
         break;
 
@@ -609,7 +619,8 @@ function handleMessageWrapper(request, sender, sendResponse) {
     'OUTLOOK_AUTH',
     'AUTH_AND_FETCH_GMAIL',
     'AUTH_AND_FETCH_OUTLOOK',
-    'DELETE_SENDERS'
+    'DELETE_SENDERS',
+    'OPEN_POPUP'
     // TOGGLE_AUTO_CLEAN uses async internally but sends response synchronously
   ].includes(request.type);
 
