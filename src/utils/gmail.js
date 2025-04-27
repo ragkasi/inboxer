@@ -79,6 +79,84 @@ export class GmailService {
     }
   }
 
+  async deleteMessages(messageIds) {
+    if (!messageIds || messageIds.length === 0) {
+      console.warn('No message IDs provided for deletion');
+      return { success: false, error: 'No message IDs provided' };
+    }
+    
+    try {
+      console.log(`Attempting to delete ${messageIds.length} Gmail messages`);
+      
+      // For better performance with multiple messages, use batch requests
+      if (messageIds.length > 1) {
+        // Process in batches of 50 to avoid hitting API limits
+        const batchSize = 50;
+        const batches = [];
+        
+        for (let i = 0; i < messageIds.length; i += batchSize) {
+          const batch = messageIds.slice(i, i + batchSize);
+          batches.push(batch);
+        }
+        
+        const results = await Promise.all(batches.map(async (batch) => {
+          // Use Gmail's batchModify endpoint for efficient processing
+          const response = await fetch(
+            'https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify',
+            {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                ids: batch,
+                addLabelIds: ['TRASH']
+              })
+            }
+          );
+          
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(`Failed to delete messages: ${errorData.error?.message || response.statusText}`);
+          }
+          
+          return response;
+        }));
+        
+        console.log(`Successfully processed ${messageIds.length} messages for deletion`);
+        return { success: true, count: messageIds.length };
+      } else {
+        // For a single message, use standard delete endpoint
+        const response = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageIds[0]}/trash`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`,
+              'Content-Type': 'application/json',
+            }
+          }
+        );
+        
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(`Failed to delete message: ${errorData.error?.message || response.statusText}`);
+        }
+        
+        console.log('Successfully deleted message');
+        return { success: true, count: 1 };
+      }
+    } catch (error) {
+      console.error('Error deleting Gmail messages:', error);
+      return { 
+        success: false, 
+        error: error.message || 'Unknown error during deletion',
+        details: error
+      };
+    }
+  }
+
   async fetchThreads(maxResults = 500) {
     try {
       const headers = { 

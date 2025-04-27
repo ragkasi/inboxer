@@ -1,0 +1,144 @@
+.email-list-container {
+  width: 100%;
+  max-height: 400px;
+  overflow-y: auto;
+  font-family: Arial, sans-serif;
+}
+
+.email-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid #e0e0e0;
+  background-color: #f8f9fa;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.email-list-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.delete-button {
+  background-color: #f44336;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.delete-button:hover {
+  background-color: #d32f2f;
+}
+
+.delete-button:disabled {
+  background-color: #e57373;
+  cursor: not-allowed;
+}
+
+.email-groups {
+  padding: 0 8px;
+}
+
+.email-group {
+  margin: 8px 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.group-header {
+  display: flex;
+  align-items: center;
+  padding: 10px;
+  background-color: #f5f5f5;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.group-header:hover {
+  background-color: #eeeeee;
+}
+
+.checkbox {
+  margin-right: 10px;
+  display: flex;
+  align-items: center;
+}
+
+.checkbox input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.group-info {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.sender {
+  font-weight: 500;
+  margin-right: 8px;
+}
+
+.count {
+  color: #616161;
+  font-size: 14px;
+}
+
+.expand-icon {
+  font-size: 12px;
+  color: #616161;
+}
+
+.email-items {
+  background-color: white;
+}
+
+.email-item {
+  display: flex;
+  padding: 10px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.email-content {
+  flex: 1;
+  overflow: hidden;
+}
+
+.email-subject {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+
+.email-snippet {
+  color: #616161;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.loading-container, 
+.error-container, 
+.empty-container {
+  padding: 20px;
+  text-align: center;
+  color: #616161;
+}
+
+.error-container {
+  color: #d32f2f;
+} 

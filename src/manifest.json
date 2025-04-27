@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Inbox Group & Mass-Delete",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Group your emails by sender/company for quick mass-deletion.",
   "permissions": [
     "storage",
@@ -12,19 +12,26 @@
     "https://mail.google.com/*",
     "https://outlook.office.com/*",
     "https://www.googleapis.com/*",
+    "https://gmail.googleapis.com/*",
     "https://graph.microsoft.com/*",
     "https://login.microsoftonline.com/*"
   ],
-  "background": {
-    "service_worker": "background.bundle.js"
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://graph.microsoft.com/ https://login.microsoftonline.com/ https://www.googleapis.com/ https://gmail.googleapis.com/"
   },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
   "content_scripts": [{
     "matches": [
       "https://mail.google.com/*",
       "https://outlook.office.com/*"
     ],
-    "js": ["content.bundle.js"],
-    "run_at": "document_idle"
+    "js": ["content.js"],
+    "run_at": "document_idle",
+    "world": "ISOLATED"
   }],
   "action": {
     "default_popup": "popup.html",
@@ -35,6 +42,12 @@
       "128": "icons/icon128.png"
     }
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["graph-shim.js", "popup.html", "popup.js", "react.js", "redux.js", "724.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "oauth2": {
     "client_id": "${GOOGLE_CLIENT_ID}",
     "scopes": [
