@@ -1,12 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Inbox Group & Mass-Delete",
-  "version": "1.0.1",
+  "version": "1.0.7",
   "description": "Group your emails by sender/company for quick mass-deletion.",
   "permissions": [
     "storage",
     "identity",
-    "alarms"
+    "alarms",
+    "activeTab",
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "https://mail.google.com/*",
@@ -30,11 +33,11 @@
       "https://outlook.office.com/*"
     ],
     "js": ["content.js"],
-    "run_at": "document_idle",
-    "world": "MAIN"
+    "run_at": "document_start",
+    "world": "ISOLATED",
+    "all_frames": true
   }],
   "action": {
-    "default_popup": "popup.html",
     "default_title": "Email Cleaner",
     "default_icon": {
       "16": "icons/icon16.png",

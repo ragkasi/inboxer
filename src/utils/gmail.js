@@ -3,10 +3,127 @@ import axios from 'axios';
 export class GmailService {
   constructor() {
     this.accessToken = null;
+    this.initialized = false;
   }
 
   async initialize(clientId) {
     this.clientId = clientId;
+    
+    try {
+      // Create a simple client object for Gmail API interaction
+      // We're not using the Google API client library because it's complex to integrate with MV3
+      // Instead, we create a client interface using fetch that mimics the same interface
+      this.client = {
+        users: {
+          messages: {
+            list: async (params) => {
+              return this.fetchWithAuth(`https://gmail.googleapis.com/gmail/v1/users/${params.userId}/messages`, params);
+            },
+            get: async (params) => {
+              return this.fetchWithAuth(`https://gmail.googleapis.com/gmail/v1/users/${params.userId}/messages/${params.id}`);
+            },
+            trash: async (params) => {
+              return this.fetchWithAuth(
+                `https://gmail.googleapis.com/gmail/v1/users/${params.userId}/messages/${params.id}/trash`,
+                null,
+                'POST'
+              );
+            },
+            batchModify: async (params) => {
+              return this.fetchWithAuth(
+                `https://gmail.googleapis.com/gmail/v1/users/${params.userId}/messages/batchModify`,
+                params.requestBody,
+                'POST'
+              );
+            }
+          },
+          threads: {
+            list: async (params) => {
+              return this.fetchWithAuth(`https://gmail.googleapis.com/gmail/v1/users/${params.userId}/threads`, params);
+            },
+            get: async (params) => {
+              return this.fetchWithAuth(`https://gmail.googleapis.com/gmail/v1/users/${params.userId}/threads/${params.id}`);
+            }
+          }
+        }
+      };
+      
+      this.initialized = true;
+      console.log('Gmail client successfully initialized');
+      return this.client;
+    } catch (error) {
+      console.error('Error initializing Gmail client:', error);
+      this.initialized = false;
+      throw error;
+    }
+  }
+  
+  // Helper method to perform authenticated fetch requests
+  async fetchWithAuth(url, params = null, method = 'GET') {
+    if (!this.accessToken) {
+      throw new Error('No access token available. Please authenticate first.');
+    }
+    
+    try {
+      const headers = {
+        'Authorization': `Bearer ${this.accessToken}`,
+        'Content-Type': 'application/json'
+      };
+      
+      const options = {
+        method,
+        headers
+      };
+      
+      // For GET requests, add query parameters to URL
+      if (method === 'GET' && params) {
+        const queryParams = new URLSearchParams();
+        
+        // Filter out special parameters
+        const { userId, id, ...restParams } = params;
+        
+        // Add remaining params to query string
+        Object.entries(restParams).forEach(([key, value]) => {
+          if (value !== undefined && value !== null) {
+            queryParams.append(key, value);
+          }
+        });
+        
+        const queryString = queryParams.toString();
+        if (queryString) {
+          url = `${url}?${queryString}`;
+        }
+      }
+      
+      // For POST/PUT/PATCH, add body
+      if (method !== 'GET' && params) {
+        options.body = JSON.stringify(params);
+      }
+      
+      const response = await fetch(url, options);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorJson;
+        try {
+          errorJson = JSON.parse(errorText);
+        } catch (e) {
+          // If not JSON, use the raw text
+          errorJson = { error: errorText };
+        }
+        
+        throw new Error(`API request failed: ${errorJson.error?.message || response.statusText}`);
+      }
+      
+      // Parse response as JSON if it's not empty
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : {};
+      
+      return { data };
+    } catch (error) {
+      console.error('Error in fetchWithAuth:', error);
+      throw error;
+    }
   }
 
   async authenticate() {
@@ -88,6 +205,11 @@ export class GmailService {
     try {
       console.log(`Attempting to delete ${messageIds.length} Gmail messages`);
       
+      if (!this.client || !this.initialized) {
+        // Make sure the client is initialized
+        await this.initialize(this.clientId);
+      }
+      
       // For better performance with multiple messages, use batch requests
       if (messageIds.length > 1) {
         // Process in batches of 50 to avoid hitting API limits
@@ -101,48 +223,25 @@ export class GmailService {
         
         const results = await Promise.all(batches.map(async (batch) => {
           // Use Gmail's batchModify endpoint for efficient processing
-          const response = await fetch(
-            'https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify',
-            {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                ids: batch,
-                addLabelIds: ['TRASH']
-              })
+          await this.client.users.messages.batchModify({
+            userId: 'me',
+            requestBody: {
+              ids: batch,
+              addLabelIds: ['TRASH']
             }
-          );
+          });
           
-          if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(`Failed to delete messages: ${errorData.error?.message || response.statusText}`);
-          }
-          
-          return response;
+          return { success: true, count: batch.length };
         }));
         
         console.log(`Successfully processed ${messageIds.length} messages for deletion`);
         return { success: true, count: messageIds.length };
       } else {
-        // For a single message, use standard delete endpoint
-        const response = await fetch(
-          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageIds[0]}/trash`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${this.accessToken}`,
-              'Content-Type': 'application/json',
-            }
-          }
-        );
-        
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(`Failed to delete message: ${errorData.error?.message || response.statusText}`);
-        }
+        // For a single message, use standard trash endpoint
+        await this.client.users.messages.trash({
+          userId: 'me',
+          id: messageIds[0]
+        });
         
         console.log('Successfully deleted message');
         return { success: true, count: 1 };
@@ -159,25 +258,25 @@ export class GmailService {
 
   async fetchThreads(maxResults = 500) {
     try {
-      const headers = { 
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      };
+      if (!this.client || !this.initialized) {
+        // Make sure the client is initialized
+        await this.initialize(this.clientId);
+      }
       
       // Fetch thread list
-      const listResponse = await axios.get(
-        'https://gmail.googleapis.com/gmail/v1/users/me/threads',
-        { headers, params: { maxResults } }
-      );
+      const listResponse = await this.client.users.threads.list({
+        userId: 'me',
+        maxResults
+      });
       const threads = listResponse.data.threads || [];
 
       // Fetch details for each thread
       const details = await Promise.all(
         threads.map(thread =>
-          axios.get(
-            `https://gmail.googleapis.com/gmail/v1/users/me/threads/${thread.id}`,
-            { headers }
-          )
+          this.client.users.threads.get({
+            userId: 'me',
+            id: thread.id
+          })
         )
       );
       

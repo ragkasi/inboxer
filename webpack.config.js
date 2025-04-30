@@ -162,7 +162,8 @@ const uiConfig = {
   ...commonConfig,
   target: 'web',
   entry: {
-    popup: './src/popup/index.jsx',
+    // Remove popup entry point - we'll use src/popup.html directly
+    // popup: './src/popup/index.jsx',
     content: './src/content.js'
   },
   output: {
@@ -206,12 +207,15 @@ const uiConfig = {
     }
   },
   plugins: [
+    // Remove the HtmlWebpackPlugin for popup.html completely
+    /*
     new HtmlWebpackPlugin({
-      template: path.resolve(__dirname, 'public/popup.html'),
+      template: path.resolve(__dirname, 'src/popup.html'),
       filename: 'popup.html',
-      chunks: ['popup', 'react', 'redux'],
-      inject: 'head'
+      chunks: [], // Don't include any chunks - we want the HTML file as-is
+      inject: false // Don't inject any scripts
     }),
+    */
     new CopyPlugin({
       patterns: [
         { 

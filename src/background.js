@@ -211,6 +211,34 @@ async function handleMessageAsync(request, sender, sendResponse) {
         }
         break;
 
+      case 'PANEL_OPENED':
+        try {
+          console.log('[PANEL_OPENED] Panel opened at:', request.location);
+          // Log this event - could be useful for analytics
+          await chrome.storage.local.set({ 
+            'panel_opened_timestamp': Date.now(),
+            'panel_location': request.location
+          });
+          // No need to wait for response
+          sendResponse({ success: true });
+        } catch (error) {
+          console.error('[PANEL_OPENED] Error:', error);
+          sendResponse({ success: false, error: serializeError(error) });
+        }
+        break;
+
+      case 'OPEN_EMAIL_CLEANER':
+        try {
+          console.log('[OPEN_EMAIL_CLEANER] Request to open email cleaner from:', sender?.tab?.url || 'unknown');
+          // This message is sent from background to content script, not the other way around
+          // But we'll handle it here in case the content script sends it
+          sendResponse({ success: true, message: 'Email cleaner open request acknowledged' });
+        } catch (error) {
+          console.error('[OPEN_EMAIL_CLEANER] Error:', error);
+          sendResponse({ success: false, error: serializeError(error) });
+        }
+        break;
+
       case 'SELECT_SERVICE':
         try {
           if (request.service && ['gmail', 'outlook'].includes(request.service)) {
@@ -238,89 +266,364 @@ async function handleMessageAsync(request, sender, sendResponse) {
         }
         break;
 
-      case 'CLEAN_EMAILS':
-        const requestedService = request.service || selectedService; // Use request.service if provided, fallback to global
-        console.log(`[CLEAN_EMAILS] 1. Received request. Service: ${requestedService}, Message IDs:`, request.messageIds);
+      case 'AUTHENTICATE_GMAIL_DIRECTLY':
+        console.log('[AUTHENTICATE_GMAIL_DIRECTLY] Starting direct Gmail authentication');
         
-        if (!requestedService) {
-          console.error('[CLEAN_EMAILS] Error: No service specified or selected');
-          return sendResponse({ 
-            error: 'No service specified or selected',
-            success: false
-          });
-        }
+        // Create a connection keepalive to prevent port closure
+        const authKeepAliveInterval = setInterval(() => {
+          console.log('[AUTHENTICATE_GMAIL_DIRECTLY] Keeping connection alive...');
+        }, 1000);
         
-        if (!request.messageIds || !Array.isArray(request.messageIds) || request.messageIds.length === 0) {
-          console.error('[CLEAN_EMAILS] Error: No message IDs provided');
-          return sendResponse({ 
-            error: 'No message IDs provided for cleaning',
-            success: false
-          });
-        }
-        
-        console.log(`[CLEAN_EMAILS] 2. Processing deletion for ${request.messageIds.length} emails via ${requestedService}`);
         try {
-          // Verify service exists and is initialized
-          if (!services[requestedService]) {
-            // If the requested service doesn't exist, check if any other service is available
-            const availableServices = Object.keys(services).filter(key => services[key]);
-            if (availableServices.length === 0) {
-              const serviceErrorMsg = `No email services are available`;
-              console.error(`[CLEAN_EMAILS] Error: ${serviceErrorMsg}`);
-              throw new Error(serviceErrorMsg);
+          chrome.identity.getAuthToken({ interactive: true }, async (token) => {
+            let responded = false;
+            
+            const error = logRuntimeError('Gmail direct auth');
+            if (error || !token) {
+              clearInterval(authKeepAliveInterval);
+              console.error('[AUTHENTICATE_GMAIL_DIRECTLY] Failed to get auth token:', error);
+              
+              if (!responded) {
+                responded = true;
+                sendResponse({
+                  success: false,
+                  error: error || 'Failed to get Gmail authentication token'
+                });
+              }
+              return;
             }
             
-            // Use the first available service as a fallback
-            const fallbackService = availableServices[0];
-            console.log(`[CLEAN_EMAILS] Service ${requestedService} not available, falling back to ${fallbackService}`);
-            const serviceErrorMsg = `Service ${requestedService} is not available, using ${fallbackService} instead`;
-            console.warn(`[CLEAN_EMAILS] Warning: ${serviceErrorMsg}`);
-            // Continue with the fallback service
-            requestedService = fallbackService;
-          }
-          
-          // Ensure the service is authenticated
-          if (!services[requestedService].accessToken) {
-            console.log(`[CLEAN_EMAILS] 3a. Authenticating ${requestedService} before cleaning...`);
-            const authSuccess = await services[requestedService].authenticate();
-            if (!authSuccess) {
-              const authErrorMsg = `Failed to authenticate with ${requestedService}`;
-              console.error(`[CLEAN_EMAILS] Error: ${authErrorMsg}`);
-              throw new Error(authErrorMsg);
+            try {
+              console.log('[AUTHENTICATE_GMAIL_DIRECTLY] Got auth token:', token.substring(0, 5) + '...');
+              
+              // Store token for later use
+              await chrome.storage.local.set({ 'gmail_token': token });
+              
+              // Set the token on the service
+              services.gmail.accessToken = token;
+              
+              // Immediately send success response
+              if (!responded) {
+                responded = true;
+                clearInterval(authKeepAliveInterval);
+                
+                console.log('[AUTHENTICATE_GMAIL_DIRECTLY] Authentication successful, sending response');
+                sendResponse({ success: true });
+              }
+              
+              // Try to initialize the service with this token, but don't wait for it before responding
+              try {
+                await services.gmail.initialize(config.gmail.clientId);
+                console.log('[AUTHENTICATE_GMAIL_DIRECTLY] Gmail service initialized successfully');
+              } catch (initError) {
+                console.error('[AUTHENTICATE_GMAIL_DIRECTLY] Gmail service initialization failed:', initError);
+                // We already responded, so we just log the error
+              }
+            } catch (e) {
+              clearInterval(authKeepAliveInterval);
+              console.error('[AUTHENTICATE_GMAIL_DIRECTLY] Error during authentication:', e);
+              
+              if (!responded) {
+                responded = true;
+                sendResponse({ 
+                  success: false, 
+                  error: 'Error during authentication: ' + serializeError(e)
+                });
+              }
             }
-            console.log(`[CLEAN_EMAILS] 3b. Authentication successful.`);
-        } else {
-             console.log(`[CLEAN_EMAILS] 3c. Already authenticated with ${requestedService}.`);
-          }
-          
-          // Call the deleteMessages method on the correct service instance
-          console.log(`[CLEAN_EMAILS] 4. Calling deleteMessages for ${requestedService}...`);
-          const deleteResult = await services[requestedService].deleteMessages(request.messageIds);
-          console.log(`[CLEAN_EMAILS] 5. deleteMessages result for ${requestedService}:`, deleteResult);
-          
-          if (!deleteResult || !deleteResult.success) {
-             const deleteErrorMsg = deleteResult?.error || `Unknown error from deleteMessages for ${requestedService}`;
-             console.error(`[CLEAN_EMAILS] Error: ${deleteErrorMsg}`);
-             throw new Error(deleteErrorMsg);
-          }
-          
-          console.log(`[CLEAN_EMAILS] 6. Successfully deleted ${deleteResult.count} emails. Sending success response.`);
-          sendResponse({ 
-            success: true, 
-            count: deleteResult.count, 
-            failedCount: deleteResult.failedCount || 0, 
-            errors: deleteResult.errors 
           });
           
-        } catch (error) {
-          console.error(`[CLEAN_EMAILS] 7. Caught error during cleaning for ${requestedService}:`, error);
-          sendResponse({ 
-            success: false, 
-            error: `Failed to clean emails: ${error.message || 'Unknown error'}`, 
-            details: serializeError(error) 
+          // Must return true for async response
+          return true;
+        } catch (e) {
+          clearInterval(authKeepAliveInterval);
+          console.error('[AUTHENTICATE_GMAIL_DIRECTLY] Caught exception:', e);
+          sendResponse({
+            success: false,
+            error: 'Exception during authentication: ' + serializeError(e)
           });
+          return false;
         }
         break;
+
+      case 'CLEAN_EMAILS':
+        console.log('[CLEAN_EMAILS] Received request to clean emails:', request);
+        
+        // Create a connection keepalive to prevent port closure
+        const cleanupKeepAliveInterval = setInterval(() => {
+          console.log('[CLEAN_EMAILS] Keeping connection alive...');
+        }, 1000);
+        
+        let responded = false;
+        
+        try {
+          if (!request.messageIds || !Array.isArray(request.messageIds) || request.messageIds.length === 0) {
+            clearInterval(cleanupKeepAliveInterval);
+            console.error('[CLEAN_EMAILS] No message IDs provided');
+            return sendResponse({ 
+              success: false, 
+              error: 'No message IDs provided' 
+            });
+          }
+          
+          const service = request.service || selectedService;
+          if (!service) {
+            clearInterval(cleanupKeepAliveInterval);
+            console.error('[CLEAN_EMAILS] No service specified or selected');
+            return sendResponse({ 
+              success: false, 
+              error: 'No email service specified or selected' 
+            });
+          }
+          
+          console.log(`[CLEAN_EMAILS] Attempting to delete ${request.messageIds.length} emails from ${service}`);
+          
+          if (service === 'gmail') {
+            console.log('[CLEAN_EMAILS] Processing Gmail deletion request');
+            
+            // Get the stored token first
+            chrome.storage.local.get(['gmail_token'], async (result) => {
+              try {
+                const token = result.gmail_token;
+                
+                if (!token) {
+                  clearInterval(cleanupKeepAliveInterval);
+                  console.error('[CLEAN_EMAILS] No Gmail token found in storage');
+                  
+                  if (!responded) {
+                    responded = true;
+              return sendResponse({ 
+                success: false, 
+                      error: 'No authentication token found. Please try authenticating again.'
+              });
+            }
+                  return;
+                }
+                
+                console.log('[CLEAN_EMAILS] Found stored token, initializing Gmail client');
+                
+                // Set the access token
+                services.gmail.accessToken = token;
+            
+                // Process messages in small batches for faster response
+                const firstBatchSize = Math.min(10, request.messageIds.length);
+                const firstBatch = request.messageIds.slice(0, firstBatchSize);
+                const remainingBatch = request.messageIds.slice(firstBatchSize);
+              
+              try {
+                  // First initialize the client if needed
+                  if (!services.gmail.client || !services.gmail.initialized) {
+                    await services.gmail.initialize(config.gmail.clientId);
+                  }
+                  
+                  if (!services.gmail.client) {
+                    clearInterval(cleanupKeepAliveInterval);
+                    console.error('[CLEAN_EMAILS] Failed to initialize Gmail client');
+                    
+                    if (!responded) {
+                      responded = true;
+                      return sendResponse({
+                        success: false, 
+                        error: 'Failed to initialize Gmail client'
+                      });
+                  }
+                    return;
+                  }
+                  
+                  // Process first batch, then respond to user
+                  await processMessageBatch(firstBatch);
+                  
+                  // Send success response for the first batch
+                  if (!responded) {
+                    responded = true;
+                    clearInterval(cleanupKeepAliveInterval);
+                    
+                    console.log(`[CLEAN_EMAILS] First batch processed (${firstBatchSize} messages), sending response`);
+                    sendResponse({ 
+                      success: true, 
+                      count: firstBatchSize,
+                      message: remainingBatch.length > 0 ? 
+                        `Deleted ${firstBatchSize} messages, continuing with remaining ${remainingBatch.length} in the background...` : 
+                        `Successfully deleted ${firstBatchSize} messages`
+                    });
+                }
+                  
+                  // Process remaining messages in the background
+                  if (remainingBatch.length > 0) {
+                    processRemainingMessages(remainingBatch);
+                  }
+                } catch (initError) {
+                  clearInterval(cleanupKeepAliveInterval);
+                  console.error('[CLEAN_EMAILS] Gmail client error:', initError);
+                  
+                  if (!responded) {
+                    responded = true;
+              return sendResponse({ 
+                      success: false,
+                      error: 'Error initializing Gmail client: ' + serializeError(initError)
+                    });
+                  }
+                }
+              } catch (error) {
+                clearInterval(cleanupKeepAliveInterval);
+                console.error('[CLEAN_EMAILS] Error in Gmail deletion:', error);
+                
+                if (!responded) {
+                  responded = true;
+              return sendResponse({ 
+                success: false, 
+                    error: `Error deleting emails: ${serializeError(error)}`
+                  });
+                }
+              }
+            });
+            
+            // Helper function to process a batch of messages
+            async function processMessageBatch(messageBatch) {
+              if (messageBatch.length === 0) return { success: true, count: 0 };
+              
+              if (messageBatch.length === 1) {
+                // For a single message, use trash endpoint
+                await services.gmail.client.users.messages.trash({
+                  userId: 'me',
+                  id: messageBatch[0]
+                });
+                return { success: true, count: 1 };
+              } else {
+                // For multiple messages, use batchModify
+                await services.gmail.client.users.messages.batchModify({
+                  userId: 'me',
+                  requestBody: {
+                    ids: messageBatch,
+                    addLabelIds: ['TRASH']
+                  }
+                });
+                return { success: true, count: messageBatch.length };
+              }
+            }
+            
+            // Helper function to process remaining messages in background
+            async function processRemainingMessages(remaining) {
+              try {
+                console.log(`[CLEAN_EMAILS] Processing remaining ${remaining.length} messages in the background`);
+                
+                // Process in batches of 50
+                const batchSize = 50;
+                let successCount = 0;
+                let errorCount = 0;
+                
+                for (let i = 0; i < remaining.length; i += batchSize) {
+                  const batch = remaining.slice(i, i + batchSize);
+                  
+                  try {
+                    await processMessageBatch(batch);
+                    successCount += batch.length;
+                    console.log(`[CLEAN_EMAILS] Background batch ${Math.floor(i/batchSize) + 1} complete, ${successCount}/${remaining.length} processed`);
+                  } catch (batchError) {
+                    errorCount += batch.length;
+                    console.error(`[CLEAN_EMAILS] Error in background batch:`, batchError);
+                  }
+                  
+                  // Small delay between batches
+                  if (i + batchSize < remaining.length) {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                  }
+                }
+                
+                console.log(`[CLEAN_EMAILS] Background processing complete. Success: ${successCount}, Failed: ${errorCount}`);
+              } catch (error) {
+                console.error('[CLEAN_EMAILS] Error processing background messages:', error);
+            }
+            }
+            
+            // Required for async sendResponse
+            return true;
+          } 
+          else if (service === 'outlook') {
+            // Ensure we have an authenticated Outlook client
+            const outlookClient = await services.outlook.initialize(config.outlook.clientId);
+            if (!outlookClient) {
+              console.error('[CLEAN_EMAILS] Outlook client not available');
+              return sendResponse({ 
+                success: false, 
+                error: 'Outlook client not available. Please authenticate first.' 
+              });
+            }
+            
+            // Outlook implementation similar to Gmail
+            const batchSize = 20;
+            let successCount = 0;
+            let errorCount = 0;
+            
+            for (let i = 0; i < request.messageIds.length; i += batchSize) {
+              const batch = request.messageIds.slice(i, i + batchSize);
+              console.log(`[CLEAN_EMAILS] Processing Outlook batch ${i/batchSize + 1}/${Math.ceil(request.messageIds.length/batchSize)}`);
+              
+              try {
+                const results = await Promise.allSettled(batch.map(async (messageId) => {
+                  try {
+                    await outlookClient.api(`/me/messages/${messageId}/move`).post({
+                      destinationId: 'deleteditems'
+                    });
+                    return { success: true, messageId };
+                  } catch (error) {
+                    console.error(`[CLEAN_EMAILS] Error moving Outlook message ${messageId}:`, error);
+                    return { success: false, messageId, error };
+                  }
+                }));
+                
+                results.forEach(result => {
+                  if (result.status === 'fulfilled' && result.value.success) {
+                    successCount++;
+                  } else {
+                    errorCount++;
+                  }
+                });
+                
+                if (i + batchSize < request.messageIds.length) {
+                  await new Promise(resolve => setTimeout(resolve, 300));
+                }
+              } catch (batchError) {
+                console.error(`[CLEAN_EMAILS] Error processing Outlook batch:`, batchError);
+                errorCount += batch.length;
+              }
+            }
+            
+            console.log(`[CLEAN_EMAILS] Completed Outlook deletion. Success: ${successCount}, Failed: ${errorCount}`);
+            
+            if (successCount > 0) {
+              return sendResponse({ 
+                success: true, 
+                count: successCount,
+                failed: errorCount,
+                partial: errorCount > 0,
+                message: errorCount > 0 ? 
+                  `Moved ${successCount} emails to Deleted Items, but ${errorCount} failed` : 
+                  `Successfully moved ${successCount} emails to Deleted Items`
+              });
+            } else {
+              return sendResponse({ 
+                success: false, 
+                error: `Failed to delete any emails. Please try again later.` 
+              });
+            }
+          } 
+          else {
+            return sendResponse({ 
+              success: false, 
+              error: `Unsupported service: ${service}` 
+            });
+          }
+        } catch (error) {
+          console.error('[CLEAN_EMAILS] Exception:', error);
+          return sendResponse({ 
+            success: false, 
+            error: `Exception cleaning emails: ${error.message || 'Unknown error'}`
+          });
+        }
+        
+        // Ensure async handling
+        return true;
 
       // --- Simplified Status/Info Handlers (Assumed Safe/Sync for Wrapper) ---
       case 'GET_STATUS':
@@ -344,76 +647,38 @@ async function handleMessageAsync(request, sender, sendResponse) {
       // ... other simple cases like GET_AUTH_STATUS, FETCH_EMAILS (placeholder), DELETE_EMAIL (placeholder), OPEN_POPUP
 
       case 'OPEN_POPUP':
-        console.log('[OPEN_POPUP] Received request');
-        try {
-          console.log('[OPEN_POPUP] 1. Setting storage...');
-          await chrome.storage.local.set({ 
-            'popup_requested': Date.now(),
-            'popup_source': 'content_script'
-          });
-          console.log('[OPEN_POPUP] 2. Storage set. Setting popup URL...');
-          
-          // Ensure popup is set correctly
-          await new Promise((resolve, reject) => {
-            chrome.action.setPopup({ popup: 'popup.html' }, () => {
-              const error = logRuntimeError('setPopup');
-              if (error) {
-                console.error('[OPEN_POPUP] 3a. Error setting popup:', error);
-                reject(error);
-              } else {
-                console.log('[OPEN_POPUP] 3b. Popup URL set successfully.');
-                resolve();
-              }
-            });
-          });
-          
-          console.log('[OPEN_POPUP] 4. Attempting programmatic open...');
-          
+        console.log('Attempting to open popup from background script');
+        
+        // Try using chrome.action.openPopup() if available (Chrome 92+)
+        if (chrome.action && chrome.action.openPopup) {
           try {
-            // Attempt multiple techniques to open the popup
-            
-            // Technique 1: Use chrome.action.openPopup if available
-            if (chrome.action && typeof chrome.action.openPopup === 'function') {
-              try {
-                await chrome.action.openPopup();
-                console.log('[OPEN_POPUP] 4a. chrome.action.openPopup() called successfully.');
-              } catch (popupError) {
-                console.log('[OPEN_POPUP] 4b. chrome.action.openPopup() threw an error:', popupError);
-                // Continue to other techniques
-              }
-            } else {
-              console.log('[OPEN_POPUP] 4c. chrome.action.openPopup() not available');
-            }
-            
-            // Regardless of whether the programmatic popup worked, send a success response
-            // because our content script will detect if it didn't work and show a message
-            console.log('[OPEN_POPUP] 5. Sending success response...');
-            sendResponse({ 
-              status: 'success', 
-              message: 'Popup opening initiated',
-              success: true
-            });
-          } catch (openError) {
-            console.error('[OPEN_POPUP] Error opening popup:', openError);
-            // Send warning response if we can't open programmatically
-            sendResponse({ 
-              status: 'warning', 
-              message: 'Please click the extension icon in the toolbar',
-              success: true,
-              reason: 'Programmatic popup opening failed: ' + (openError.message || 'unknown error')
-            });
+            chrome.action.openPopup();
+            console.log('Opened popup via chrome.action.openPopup()');
+            sendResponse({ success: true });
+          } catch (error) {
+            console.error('Failed to open popup via chrome.action.openPopup():', error);
+            sendResponse({ success: false, error: error.message });
           }
-          
-          return true; // Indicate async response
-        } catch (error) {
-          console.error('[OPEN_POPUP] Exception during handler execution:', error);
-          // Try to send error response
+        } 
+        // Try using chrome.browserAction for older Chrome versions
+        else if (chrome.browserAction && chrome.browserAction.openPopup) {
           try {
-             sendResponse({ status: 'error', error: 'Exception in OPEN_POPUP handler: ' + serializeError(error) });
-          } catch(e) { console.error('Failed to send error response after exception', e); }
-          return true; // Maintain async response
+            chrome.browserAction.openPopup();
+            console.log('Opened popup via chrome.browserAction.openPopup()');
+            sendResponse({ success: true });
+          } catch (error) {
+            console.error('Failed to open popup via chrome.browserAction.openPopup():', error);
+            sendResponse({ success: false, error: error.message });
+          }
         }
-        break;
+        // If neither API is available
+        else {
+          console.log('openPopup API not available on this browser');
+          sendResponse({ success: false, reason: 'API_NOT_AVAILABLE' });
+        }
+        
+        // Required for async sendResponse
+        return true;
 
       // --- Authentication Flows (Require Async Handling) ---
       case 'GMAIL_AUTH':
@@ -620,7 +885,9 @@ function handleMessageWrapper(request, sender, sendResponse) {
     'AUTH_AND_FETCH_GMAIL',
     'AUTH_AND_FETCH_OUTLOOK',
     'DELETE_SENDERS',
-    'OPEN_POPUP'
+    'OPEN_POPUP',
+    'PANEL_OPENED',
+    'OPEN_EMAIL_CLEANER'
     // TOGGLE_AUTO_CLEAN uses async internally but sends response synchronously
   ].includes(request.type);
 
@@ -759,13 +1026,45 @@ chrome.runtime.onInstalled.addListener((details) => {
   }
 });
 
-chrome.action.onClicked.addListener(() => {
+// Add back the listener for extension icon clicks
+chrome.action.onClicked.addListener((tab) => {
   try {
-    console.log("🔔 [Test] Extension icon clicked — service worker is alive");
-    // Potentially open the popup manually here if needed, or ensure it's set
-    chrome.action.setPopup({ popup: 'popup.html' });
+    // Ensure we have a valid tab ID
+    if (tab.id) {
+      // Check if the current tab is Gmail or Outlook
+      const isGmailOrOutlook = tab.url && (
+        tab.url.includes('mail.google.com') || 
+        tab.url.includes('outlook.office.com')
+      );
+      
+      if (isGmailOrOutlook) {
+        console.log("🔔 Extension icon clicked on Gmail/Outlook — attempting to call openEmailCleaner");
+        
+        // Check if content script is loaded and inject if needed
+        ensureContentScriptLoaded(tab.id, () => {
+          // After ensuring content script is loaded, send the message
+          chrome.tabs.sendMessage(tab.id, { type: "OPEN_EMAIL_CLEANER" }, (response) => {
+            if (chrome.runtime.lastError) {
+              console.log('Error calling openEmailCleaner via message:', chrome.runtime.lastError);
+              // Try sending a manual instructions message (also might fail, but worth trying)
+              chrome.tabs.sendMessage(tab.id, { type: "SHOW_MANUAL_INSTRUCTIONS" }, () => {
+                // Ignore any errors here
+              });
+            } else {
+              console.log('Successfully requested openEmailCleaner:', response);
+            }
+          });
+        });
+      } else {
+        // Not on Gmail or Outlook - redirect to Gmail
+        console.log("Extension icon clicked on non-email page. Redirecting to Gmail...");
+        chrome.tabs.update(tab.id, { url: "https://mail.google.com" });
+      }
+    } else {
+      console.error('Could not get active tab ID.');
+    }
   } catch (e) {
-    console.error("🛑 Error in onClicked listener:", e);
+    console.error("🛑 Error in onClicked handler:", e);
   }
 });
 
@@ -815,10 +1114,16 @@ chrome.runtime.onStartup.addListener(() => {
 
 console.log("Background script initial execution completed.");
 
-// Listen for popup connections via long-lived port
+// Listen for port connections from content scripts
 chrome.runtime.onConnect.addListener(port => {
   try {
-    if (port.name === 'popup') {
+    console.log('Port connected:', port.name);
+    
+    if (port.name === 'gmail_deletion') {
+      // Handle Gmail deletion operation via port
+      handleGmailDeletionPort(port);
+    } else if (port.name === 'popup') {
+      // Existing popup port handling
       console.log('Popup port connected');
       port.onMessage.addListener(async request => {
         const correlationId = request.correlationId;
@@ -848,9 +1153,11 @@ chrome.runtime.onConnect.addListener(port => {
           try { port.postMessage({ correlationId, status: 'error', error: serializeError(e) }); } catch {}
         }
       });
+    }
+    
       port.onDisconnect.addListener(() => {
          try {
-            console.log('Popup port disconnected');
+        console.log('Port disconnected:', port.name);
             if (chrome.runtime.lastError) {
               console.error('Port disconnected with error:', chrome.runtime.lastError.message);
             }
@@ -858,11 +1165,207 @@ chrome.runtime.onConnect.addListener(port => {
             console.error("🛑 Error in port.onDisconnect listener:", e);
           }
       });
-    }
   } catch (e) {
-    console.error("🛑 Error setting up onConnect listener:", e);
+    console.error("🛑 Error setting up port connection:", e);
   }
 });
+
+/**
+ * Handler for Gmail deletion port operations.
+ * Uses a long-lived connection for better reliability.
+ */
+function handleGmailDeletionPort(port) {
+  console.log(`[Gmail Port ${port.sender?.tab?.id}] Connection established.`);
+  let operationActive = false;
+
+  port.onMessage.addListener(async (request) => {
+    // Prevent handling new messages if an operation is already running on this port
+    if (operationActive) {
+      console.warn(`[Gmail Port ${port.sender?.tab?.id}] Operation already active. Ignoring new request:`, request.type);
+      return;
+    }
+    operationActive = true;
+    
+    try {
+      console.log(`[Gmail Port ${port.sender?.tab?.id}] Received request:`, request.type);
+      
+      if (request.type === 'DELETE_EMAILS') {
+        // Acknowledge request immediately
+        port.postMessage({ type: 'ACKNOWLEDGED' });
+        
+        // Start the deletion process asynchronously
+        await performGmailDeleteOperation(port, request);
+      } else {
+         console.warn(`[Gmail Port ${port.sender?.tab?.id}] Unknown message type:`, request.type);
+         sendPortError(port, `Unknown request type: ${request.type}`);
+      }
+    } catch (error) {
+      console.error(`[Gmail Port ${port.sender?.tab?.id}] Error handling message:`, error);
+      sendPortError(port, 'Error processing request: ' + serializeError(error));
+    } finally {
+        // Allow new operations once this one is done (or errored)
+        // Note: The port might disconnect before this runs if errors occur
+        operationActive = false; 
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    console.log(`[Gmail Port ${port.sender?.tab?.id}] Port disconnected. Operation active:`, operationActive);
+    // Clean up any resources if needed, although intervals/timeouts should be cleared within the operation
+  });
+
+  // --- Helper functions --- 
+
+  function sendPortMessage(port, message) {
+    try {
+      // Check if port is still valid before sending
+      // Attempting to send on a disconnected port throws an error
+      port.postMessage(message);
+  } catch (e) {
+      console.warn(`[Gmail Port ${port.sender?.tab?.id}] Failed to send message (port likely disconnected):`, message, e);
+    }
+  }
+
+  function sendPortError(port, errorMessage) {
+    sendPortMessage(port, {
+      type: 'ERROR',
+      error: errorMessage
+    });
+  }
+
+  // --- Main Operation Logic --- 
+
+  async function performGmailDeleteOperation(port, request) {
+    let token = null;
+    try {
+      // 1. Authenticate
+      sendPortMessage(port, { type: 'DELETE_PROGRESS', message: 'Authenticating... ' });
+      token = await authenticateGmail(port);
+      if (!token) return; // Error handled within authenticateGmail
+      sendPortMessage(port, { type: 'AUTH_SUCCESS' });
+
+      // 2. Setup Service & Client
+      sendPortMessage(port, { type: 'DELETE_PROGRESS', message: 'Initializing Gmail access...' });
+      services.gmail.accessToken = token;
+      await initializeGmailClient(port);
+
+      // 3. Process Deletion
+      await processGmailDeletion(port, request.messageIds);
+      
+      console.log(`[Gmail Port ${port.sender?.tab?.id}] Deletion operation completed.`);
+
+    } catch (error) {
+      console.error(`[Gmail Port ${port.sender?.tab?.id}] Operation failed:`, error);
+      sendPortError(port, 'Operation failed: ' + serializeError(error));
+    } finally {
+       // Try to disconnect the port cleanly after operation finishes or fails
+       try { port.disconnect(); } catch(e) { /* Ignore error if already disconnected */ }
+    }
+  }
+
+  // Authenticate with Gmail
+  async function authenticateGmail(port) {
+      return new Promise((resolve) => {
+        chrome.identity.getAuthToken({ interactive: true }, (token) => {
+          const error = chrome.runtime.lastError;
+          if (error || !token) {
+            const errorMsg = 'Authentication failed: ' + (error?.message || 'No token received');
+            console.error('[Gmail Auth] Error:', errorMsg);
+            sendPortError(port, errorMsg);
+            resolve(null);
+          } else {
+            // Store token silently in background
+            chrome.storage.local.set({ 'gmail_token': token }).catch(err => 
+                console.warn('[Gmail Auth] Failed to store token:', err)
+            );
+            console.log('[Gmail Auth] Success.');
+            resolve(token);
+          }
+        });
+      });
+  }
+  
+  // Initialize the Gmail client
+  async function initializeGmailClient(port) {
+    try {
+      await services.gmail.initialize(config.gmail.clientId);
+      if (!services.gmail.client) {
+        throw new Error('Gmail client object not created after initialization');
+      }
+       console.log('[Gmail Init] Success.');
+    } catch (error) {
+      console.error('[Gmail Init] Error:', error);
+      sendPortError(port, 'Gmail initialization failed: ' + serializeError(error));
+      throw error; // Rethrow to stop the operation
+    }
+  }
+  
+  // Process Gmail message deletion
+  async function processGmailDeletion(port, messageIds) {
+    if (!messageIds || messageIds.length === 0) {
+        sendPortError(port, 'No message IDs provided');
+        return; // Stop processing
+    }
+
+    const batchSize = 25;
+    let processedCount = 0;
+    let failedCount = 0;
+    const totalBatches = Math.ceil(messageIds.length / batchSize);
+
+    console.log(`[Gmail Delete] Starting deletion for ${messageIds.length} messages in ${totalBatches} batches.`);
+
+    for (let i = 0; i < messageIds.length; i += batchSize) {
+        const batch = messageIds.slice(i, Math.min(i + batchSize, messageIds.length));
+        const batchNumber = Math.floor(i / batchSize) + 1;
+
+        sendPortMessage(port, {
+            type: 'DELETE_PROGRESS',
+            message: `Processing batch ${batchNumber}/${totalBatches}... (${processedCount}/${messageIds.length})`
+        });
+
+        try {
+            // Ensure client is still valid (though it should be)
+            if (!services.gmail.client) throw new Error('Gmail client not available');
+
+            if (batch.length === 1) {
+                await services.gmail.client.users.messages.trash({ userId: 'me', id: batch[0] });
+            } else {
+                await services.gmail.client.users.messages.batchModify({
+                    userId: 'me',
+                    requestBody: { ids: batch, addLabelIds: ['TRASH'] }
+                });
+            }
+            processedCount += batch.length;
+            console.log(`[Gmail Delete] Batch ${batchNumber} success (${batch.length} messages). Processed: ${processedCount}`);
+        } catch (batchError) {
+            failedCount += batch.length;
+            const errorMsg = `Batch ${batchNumber} failed: ${serializeError(batchError)}`;
+            console.error(`[Gmail Delete] ${errorMsg}`);
+            // Send error for this batch, but continue processing others
+            sendPortMessage(port, { type: 'DELETE_PROGRESS', message: errorMsg });
+        }
+
+        // Small delay between batches
+        if (i + batchSize < messageIds.length) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+    }
+
+    const finalMessage = failedCount > 0 ? 
+        `Completed: Deleted ${processedCount}, Failed ${failedCount}` : 
+        `Successfully deleted ${processedCount} emails`;
+        
+    console.log(`[Gmail Delete] Finished. ${finalMessage}`);
+    
+    // Send final status
+    sendPortMessage(port, {
+        type: 'DELETE_SUCCESS',
+        count: processedCount,
+        failed: failedCount,
+        message: finalMessage
+    });
+  }
+}
 
 // Add the smoke test message listener
 chrome.runtime.onMessage.addListener((msg, s, r) => {
@@ -903,3 +1406,65 @@ export {
   handleMessageAsync,
   serializeError
 };
+
+/**
+ * Ensures the content script is loaded in the specified tab
+ * @param {number} tabId - The ID of the tab
+ * @param {Function} callback - Function to call after ensuring content script is loaded
+ */
+function ensureContentScriptLoaded(tabId, callback) {
+  // First try a simple ping to see if content script is already loaded
+  try {
+    chrome.tabs.sendMessage(tabId, { type: "PING" }, (response) => {
+      if (response && response.success) {
+        console.log("Content script responded to ping, proceeding...");
+        callback();
+        return;
+      }
+      
+      console.log("Content script not detected or not responding, injecting content.js...");
+      
+      // Inject the content script
+      chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        files: ["content.js"],
+        world: "ISOLATED"
+      }).then(() => {
+        console.log("Content script injected successfully");
+        // Give it a moment to initialize
+        setTimeout(() => {
+          // Try pinging again to confirm it's loaded
+          chrome.tabs.sendMessage(tabId, { type: "PING" }, (pingResponse) => {
+            if (pingResponse && pingResponse.success) {
+              console.log("Injected content script confirmed working");
+            } else {
+              console.warn("Injected content script may not be working correctly");
+            }
+            callback();
+          });
+        }, 500);
+      }).catch((err) => {
+        console.error("Failed to inject content script:", err);
+        
+        // Try one more approach - register the content script
+        chrome.scripting.registerContentScripts([{
+          id: "email-cleaner-content",
+          matches: ["https://mail.google.com/*", "https://outlook.office.com/*"],
+          js: ["content.js"],
+          runAt: "document_start",
+          world: "ISOLATED"
+        }]).then(() => {
+          console.log("Content script registered, reloading page...");
+          chrome.tabs.reload(tabId);
+          setTimeout(callback, 1000);
+        }).catch(regErr => {
+          console.error("Failed to register content script:", regErr);
+          callback(); // Call callback anyway as a fallback
+        });
+      });
+    });
+  } catch (e) {
+    console.error("Error checking content script status:", e);
+    callback(); // Call callback anyway as a fallback
+  }
+}

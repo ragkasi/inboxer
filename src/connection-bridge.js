@@ -326,6 +326,87 @@ export async function initializeConnection() {
   }
 }
 
+/**
+ * Try to open the popup programmatically
+ * @returns {Promise<boolean>} - Whether opening was successful
+ */
+export async function openPopup() {
+  try {
+    console.log("Attempting to open popup");
+    
+    // First attempt: try via background script message
+    try {
+      const response = await sendMessage({ type: 'OPEN_POPUP' });
+      if (response && response.success) {
+        console.log("Popup opened via background script");
+        return true;
+      }
+    } catch (e) {
+      console.error("Failed to open popup via background:", e);
+    }
+    
+    // Second attempt: try via direct URL
+    try {
+      const extensionId = chrome.runtime.id;
+      if (extensionId) {
+        const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+        
+        // Use chrome.tabs.create for more reliable popup opening
+        // This works better with Chrome's security restrictions
+        if (chrome.tabs && chrome.tabs.create) {
+          chrome.tabs.create(
+            { 
+              url: popupUrl,
+              active: true 
+            },
+            (tab) => {
+              if (chrome.runtime.lastError) {
+                console.error('Error opening tab:', chrome.runtime.lastError);
+                return false;
+              }
+              return true;
+            }
+          );
+          return true;
+        }
+        
+        // Fallback to window.open with proper options to avoid security issues
+        const popupWindow = window.open(
+          popupUrl,
+          'EmailCleanerPopup',
+          'width=400,height=600,status=no,scrollbars=yes,resizable=yes,noopener,noreferrer'
+        );
+        
+        if (popupWindow) {
+          console.log("Popup opened via window.open");
+          return true;
+        }
+      }
+    } catch (e) {
+      console.error("Failed to open popup via direct URL:", e);
+    }
+    
+    // Final attempt: Notify user to click the extension icon manually
+    try {
+      // Send a message to show instructions via the content script
+      chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+        if (tabs && tabs[0] && tabs[0].id) {
+          chrome.tabs.sendMessage(tabs[0].id, {
+            type: "SHOW_MANUAL_INSTRUCTIONS"
+          });
+        }
+      });
+    } catch (e) {
+      console.error("Failed to send instructions message:", e);
+    }
+    
+    return false;
+  } catch (error) {
+    console.error("Error in openPopup:", error);
+    return false;
+  }
+}
+
 // Export a default object with all functions
 export default {
   serializeError,
@@ -335,5 +416,6 @@ export default {
   sendRuntimeMessage,
   sendMessage,
   wakeUpBackground,
-  initializeConnection
+  initializeConnection,
+  openPopup
 }; 
