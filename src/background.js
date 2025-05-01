@@ -88,6 +88,24 @@ function serializeError(error) {
     if (typeof error === 'string') return error;
     if (error instanceof Error) return error.message || 'Unknown error';
     if (error.message) return error.message;
+    
+    // Better handling for object-type errors
+    if (typeof error === 'object') {
+      // Try to extract useful information from the error object
+      const errorStr = JSON.stringify(error);
+      if (errorStr && errorStr !== '{}') {
+        return errorStr;
+      }
+      
+      // If we can't get a useful JSON representation,
+      // try to find any string property that might contain error info
+      for (const key in error) {
+        if (typeof error[key] === 'string' && error[key]) {
+          return `${key}: ${error[key]}`;
+        }
+      }
+    }
+    
     return JSON.stringify(error);
   } catch (e) {
     return 'Error occurred (could not serialize details)';
@@ -125,6 +143,10 @@ async function initializeExtensionServices() {
       await chrome.alarms.create('autoCleanEmails', { periodInMinutes: intervalMinutes });
       console.log(`[Initialize] Alarm set.`);
     }
+
+    // Initialize analytics system
+    console.log('[Initialize] Initializing analytics...');
+    await emailAnalytics.initialize();
 
     // Initialize services concurrently
     const servicePromises = [];
@@ -728,16 +750,20 @@ async function handleMessageAsync(request, sender, sendResponse) {
             console.log('[AUTH_AND_FETCH_GMAIL] Token acquired, initializing service...');
             await services.gmail.initialize(config.gmail.clientId); // Ensure initialized with ID
             services.gmail.accessToken = token;
-            console.log('[AUTH_AND_FETCH_GMAIL] Fetching threads...');
-            const threads = await services.gmail.fetchThreads();
+            console.log('[AUTH_AND_FETCH_GMAIL] Fetching threads (excluding sent folder)...');
+            // Fetch threads excluding sent emails
+            const threads = await services.gmail.fetchThreadsByQuery('-in:sent');
             console.log(`[AUTH_AND_FETCH_GMAIL] Fetched ${threads?.length || 0} threads`);
+            
+            // Instead of processing threads for analytics incrementally, we'll just return them
+            // This prevents double-counting emails each time the Emails tab is opened
             sendResponse({ status: "ok", threads });
           } catch (err) {
             console.error("[AUTH_AND_FETCH_GMAIL] Error fetching Gmail emails:", err);
             sendResponse({ status: "error", error: serializeError(err) });
           }
         });
-        return true; // Indicate async response
+        return true;
         
       case 'AUTH_AND_FETCH_OUTLOOK':
         console.log('[AUTH_AND_FETCH_OUTLOOK] Starting');
@@ -835,6 +861,329 @@ async function handleMessageAsync(request, sender, sendResponse) {
         }
         break; // Async handling within try/catch, but response is sent sync
 
+      case 'GET_SUBSCRIPTIONS':
+        console.log('[GET_SUBSCRIPTIONS] Fetching subscription data', request.includeEmails ? 'with email details' : 'without email details');
+        try {
+          // Initialize analytics if not already done
+          if (!emailAnalytics.senderStats || Object.keys(emailAnalytics.senderStats).length === 0) {
+            await emailAnalytics.initialize();
+          }
+          
+          // Get subscriptions (rarely opened emails)
+          const subscriptions = emailAnalytics.getRarelyOpenedSubscriptions();
+          console.log(`[GET_SUBSCRIPTIONS] Found ${subscriptions.length} subscriptions`);
+          
+          // If detailed emails are requested, fetch thread information for each subscription
+          if (request.includeEmails && subscriptions.length > 0) {
+            try {
+              console.log('[GET_SUBSCRIPTIONS] Fetching detailed email information');
+              
+              // Authenticate to get email data
+              let token = null;
+              try {
+                // Try to get token from storage first
+                const result = await chrome.storage.local.get(['gmail_token']);
+                token = result.gmail_token;
+                
+                if (!token) {
+                  // If no stored token, try to get a new one
+                  token = await new Promise((resolve, reject) => {
+                    chrome.identity.getAuthToken({ interactive: false }, (authToken) => {
+                      if (chrome.runtime.lastError) {
+                        reject(chrome.runtime.lastError);
+                        return;
+                      }
+                      resolve(authToken);
+                    });
+                  });
+                }
+              } catch (authError) {
+                console.error('[GET_SUBSCRIPTIONS] Auth error:', authError);
+                // Continue with limited data if auth fails
+              }
+              
+              if (token) {
+                // Initialize Gmail service if needed
+                services.gmail.accessToken = token;
+                if (!services.gmail.client || !services.gmail.initialized) {
+                  await services.gmail.initialize(config.gmail.clientId);
+                }
+                
+                // Fetch a limited number of threads for each subscription, up to 50 total
+                const maxThreadsPerSender = 10;
+                const totalThreadsLimit = 50;
+                let threadsAdded = 0;
+                
+                for (const subscription of subscriptions) {
+                  if (threadsAdded >= totalThreadsLimit) break;
+                  
+                  try {
+                    // Search for emails from this sender
+                    const query = `from:${subscription.email}`;
+                    const threads = await services.gmail.fetchThreadsByQuery(query, maxThreadsPerSender);
+                    
+                    if (threads && threads.length > 0) {
+                      // Add the thread data to the subscription object
+                      subscription.emails = threads;
+                      threadsAdded += threads.length;
+                    }
+                  } catch (e) {
+                    console.error(`[GET_SUBSCRIPTIONS] Error fetching threads for ${subscription.email}:`, e);
+                    // Continue with next subscription
+                  }
+                }
+                
+                console.log(`[GET_SUBSCRIPTIONS] Added email details to ${threadsAdded} threads`);
+              } else {
+                console.warn('[GET_SUBSCRIPTIONS] No auth token available for detailed email info');
+              }
+            } catch (fetchError) {
+              console.error('[GET_SUBSCRIPTIONS] Error fetching email details:', fetchError);
+              // Continue with limited subscription data
+            }
+          }
+          
+          sendResponse({
+            success: true,
+            subscriptions: subscriptions
+          });
+        } catch (error) {
+          console.error('[GET_SUBSCRIPTIONS] Error:', error);
+          sendResponse({
+            success: false,
+            error: 'Error getting subscriptions: ' + serializeError(error)
+          });
+        }
+        // Required for async sendResponse
+        return true;
+        
+      case 'GET_EMAIL_ANALYTICS':
+        console.log('[GET_EMAIL_ANALYTICS] Fetching analytics data');
+        try {
+          // Initialize analytics if not already done
+          if (!emailAnalytics.senderStats || Object.keys(emailAnalytics.senderStats).length === 0) {
+            await emailAnalytics.initialize();
+          }
+          
+          // Compute analytics data
+          const topSenders = emailAnalytics.getTopSenders(10);
+          const regularCompanies = emailAnalytics.getRegularCompanyEmails(3, 30);
+          
+          // Get actual inbox count if possible
+          let totalEmails = 0;
+          try {
+            // If Gmail service is already authenticated, get actual inbox count
+            if (services.gmail && services.gmail.accessToken) {
+              const response = await services.gmail.client.users.threads.list({
+                userId: 'me',
+                maxResults: 1,  // We only need the total, not actual threads
+                q: '-in:sent' // Exclude emails from sent folder
+              });
+              if (response && response.data && response.data.resultSizeEstimate !== undefined) {
+                totalEmails = response.data.resultSizeEstimate;
+                console.log(`[GET_EMAIL_ANALYTICS] Got actual inbox count (excluding sent): ${totalEmails}`);
+              }
+            }
+          } catch (countError) {
+            console.error('[GET_EMAIL_ANALYTICS] Error getting actual inbox count:', countError);
+            // Fall back to analytics count
+            totalEmails = emailAnalytics.getTotalEmailCount();
+          }
+          
+          // Calculate other statistics
+          const senderStats = Object.values(emailAnalytics.senderStats);
+          const totalSenders = senderStats.length;
+          const newsletters = senderStats.filter(s => s.categoryGuess === 'newsletter').length;
+          const shopping = senderStats.filter(s => s.categoryGuess === 'shopping').length;
+          
+          console.log(`[GET_EMAIL_ANALYTICS] Prepared analytics data`);
+          
+          sendResponse({
+            success: true,
+            analytics: {
+              topSenders: topSenders,
+              regularCompanies: regularCompanies,
+              stats: {
+                totalSenders: totalSenders,
+                totalEmails: totalEmails,
+                newsletters: newsletters,
+                shopping: shopping
+              }
+            }
+          });
+        } catch (error) {
+          console.error('[GET_EMAIL_ANALYTICS] Error:', error);
+          sendResponse({
+            success: false,
+            error: 'Error getting analytics: ' + serializeError(error)
+          });
+        }
+        // Required for async sendResponse
+        return true;
+        
+      case 'SCAN_EMAILS':
+        console.log('[SCAN_EMAILS] Starting scan of user emails');
+        
+        try {
+          // Get auth token for Gmail API
+          chrome.identity.getAuthToken({ interactive: true }, async token => {
+            if (chrome.runtime.lastError || !token) {
+              console.error('[SCAN_EMAILS] Auth token error:', chrome.runtime.lastError);
+              sendResponse({
+                success: false,
+                error: 'Failed to authenticate: ' + (chrome.runtime.lastError?.message || 'No token')
+              });
+              return;
+            }
+            
+            try {
+              // Initialize Gmail service
+              await services.gmail.initialize(config.gmail.clientId);
+              services.gmail.accessToken = token;
+              
+              // Fetch threads, excluding sent emails
+              console.log('[SCAN_EMAILS] Fetching threads (excluding sent folder)...');
+              const threads = await services.gmail.fetchThreadsByQuery('-in:sent', 1000); // Get up to 1000 threads, excluding sent
+              
+              if (!threads || threads.length === 0) {
+                console.warn('[SCAN_EMAILS] No threads found');
+                sendResponse({
+                  success: true,
+                  count: 0,
+                  message: 'No emails found to scan'
+                });
+                return;
+              }
+              
+              // Process threads for analytics with resetCounts=true to avoid double counting
+              console.log(`[SCAN_EMAILS] Processing ${threads.length} threads...`);
+              const updatedCount = emailAnalytics.processThreads(threads, {}, true);
+              
+              // Send response
+              sendResponse({
+                success: true,
+                count: updatedCount,
+                message: `Scanned ${updatedCount} emails successfully`
+              });
+            } catch (error) {
+              console.error('[SCAN_EMAILS] Error:', error);
+              sendResponse({
+                success: false,
+                error: 'Error scanning emails: ' + serializeError(error)
+              });
+            }
+          });
+          
+          // Required for async sendResponse
+          return true;
+        } catch (error) {
+          console.error('[SCAN_EMAILS] Top-level error:', error);
+          sendResponse({
+            success: false,
+            error: 'Error initiating scan: ' + serializeError(error)
+          });
+        }
+        break;
+        
+      case 'GET_SETTINGS':
+        console.log('[GET_SETTINGS] Fetching settings');
+        try {
+          // Make sure to add GET_SETTINGS to the requiresAsync array in handleMessageWrapper
+          // This ensures Chrome knows the response will be async
+          chrome.storage.local.get(['autoCleanEnabled', 'autoCleanInterval'], result => {
+            try {
+              console.log('[GET_SETTINGS] Retrieved settings:', result);
+              // Always use success flag for consistent response structure
+              sendResponse({
+                success: true,
+                settings: {
+                  autoCleanEnabled: result.autoCleanEnabled || false,
+                  autoCleanInterval: result.autoCleanInterval || 7 // Default to weekly
+                }
+              });
+            } catch (responseError) {
+              console.error('[GET_SETTINGS] Error preparing response:', responseError);
+              sendResponse({
+                success: false,
+                error: serializeError(responseError)
+              });
+            }
+          });
+          
+          // This is crucial - tell Chrome we'll respond asynchronously
+          return true;
+        } catch (error) {
+          console.error('[GET_SETTINGS] Error:', error);
+          sendResponse({
+            success: false,
+            error: serializeError(error)
+          });
+          return false; // synchronous response in case of error
+        }
+        break;
+        
+      case 'SAVE_SETTINGS':
+        console.log('[SAVE_SETTINGS] Saving settings:', request.settings);
+        try {
+          if (!request.settings) {
+            sendResponse({
+              success: false,
+              error: 'No settings provided'
+            });
+            return;
+          }
+          
+          const settings = {
+            autoCleanEnabled: !!request.settings.autoCleanEnabled,
+            autoCleanInterval: parseInt(request.settings.autoCleanInterval) || 7
+          };
+          
+          // Update alarm if auto-clean is enabled
+          if (settings.autoCleanEnabled) {
+            try {
+              await chrome.alarms.create('autoCleanEmails', { 
+                periodInMinutes: settings.autoCleanInterval * 24 * 60 // Convert days to minutes
+              });
+              console.log(`[SAVE_SETTINGS] Alarm set for ${settings.autoCleanInterval} days`);
+            } catch (alarmError) {
+              console.error('[SAVE_SETTINGS] Error setting alarm:', alarmError);
+              // Continue anyway - storage is more important than the alarm
+            }
+          } else {
+            try {
+              await chrome.alarms.clear('autoCleanEmails');
+              console.log('[SAVE_SETTINGS] Alarm cleared');
+            } catch (alarmError) {
+              console.error('[SAVE_SETTINGS] Error clearing alarm:', alarmError);
+              // Continue anyway - storage is more important than the alarm
+            }
+          }
+          
+          // Save settings to storage
+          try {
+            await chrome.storage.local.set(settings);
+            
+            sendResponse({
+              success: true,
+              message: 'Settings saved successfully'
+            });
+          } catch (storageError) {
+            console.error('[SAVE_SETTINGS] Error saving to storage:', storageError);
+            sendResponse({
+              success: false,
+              error: serializeError(storageError)
+            });
+          }
+        } catch (error) {
+          console.error('[SAVE_SETTINGS] Error:', error);
+          sendResponse({
+            success: false,
+            error: serializeError(error)
+          });
+        }
+        // Required for async sendResponse
+        return true;
+
       default:
         console.warn('Unknown message type received:', request.type);
         sendResponse({ status: 'error', error: `Unknown message type: ${request.type}` });
@@ -887,7 +1236,12 @@ function handleMessageWrapper(request, sender, sendResponse) {
     'DELETE_SENDERS',
     'OPEN_POPUP',
     'PANEL_OPENED',
-    'OPEN_EMAIL_CLEANER'
+    'OPEN_EMAIL_CLEANER',
+    'GET_SETTINGS',
+    'SAVE_SETTINGS',
+    'GET_SUBSCRIPTIONS',
+    'GET_EMAIL_ANALYTICS',
+    'SCAN_EMAILS'
     // TOGGLE_AUTO_CLEAN uses async internally but sends response synchronously
   ].includes(request.type);
 
@@ -1468,3 +1822,205 @@ function ensureContentScriptLoaded(tabId, callback) {
     callback(); // Call callback anyway as a fallback
   }
 }
+
+// Add email analytics storage and processing
+const emailAnalytics = {
+  // Store sender statistics
+  senderStats: {},
+  
+  // Last scan timestamp
+  lastScanTime: 0,
+  
+  // Initialize analytics from storage
+  async initialize() {
+    try {
+      const data = await chrome.storage.local.get(['senderStats', 'lastScanTime']);
+      this.senderStats = data.senderStats || {};
+      this.lastScanTime = data.lastScanTime || 0;
+      console.log('[EmailAnalytics] Initialized with', Object.keys(this.senderStats).length, 'senders');
+    } catch (error) {
+      console.error('[EmailAnalytics] Error initializing:', error);
+    }
+  },
+  
+  // Save current analytics to storage
+  async save() {
+    try {
+      await chrome.storage.local.set({
+        senderStats: this.senderStats,
+        lastScanTime: this.lastScanTime
+      });
+      console.log('[EmailAnalytics] Saved analytics data');
+    } catch (error) {
+      console.error('[EmailAnalytics] Error saving data:', error);
+    }
+  },
+  
+  // Process threads to update analytics
+  processThreads(threads, interactionData = {}, resetCounts = false) {
+    if (!threads || !Array.isArray(threads)) return 0;
+    
+    console.log(`[EmailAnalytics] Processing ${threads.length} threads`);
+    let updatedCount = 0;
+    
+    // Reset counts if this is a fresh scan rather than an incremental update
+    if (resetCounts) {
+      console.log('[EmailAnalytics] Resetting all sender counts for fresh scan');
+      Object.values(this.senderStats).forEach(stats => {
+        stats.count = 0;
+      });
+    }
+    
+    threads.forEach(thread => {
+      if (!thread.messages || !thread.messages.length) return;
+      
+      // Get the first message for sender info
+      const firstMessage = thread.messages[0];
+      if (!firstMessage.payload || !firstMessage.payload.headers) return;
+      
+      // Find sender information
+      const fromHeader = firstMessage.payload.headers.find(h => 
+        h.name.toLowerCase() === 'from' || h.name.toLowerCase() === 'sender'
+      );
+      
+      if (!fromHeader || !fromHeader.value) return;
+      
+      // Extract sender info
+      const senderRaw = fromHeader.value;
+      const senderName = this.extractSenderName(senderRaw);
+      const senderEmail = this.extractSenderEmail(senderRaw);
+      const senderDomain = this.extractDomain(senderEmail);
+      
+      // Get message dates
+      const receivedDate = new Date(firstMessage.internalDate || Date.now());
+      
+      // Check if this is a new sender
+      if (!this.senderStats[senderEmail]) {
+        this.senderStats[senderEmail] = {
+          name: senderName,
+          email: senderEmail,
+          domain: senderDomain,
+          firstSeen: receivedDate.getTime(),
+          lastSeen: receivedDate.getTime(),
+          count: 0,
+          opened: 0,
+          categoryGuess: this.guessSenderCategory(senderName, senderDomain)
+        };
+      }
+      
+      // Update sender stats
+      const stats = this.senderStats[senderEmail];
+      stats.count++;
+      stats.lastSeen = Math.max(stats.lastSeen, receivedDate.getTime());
+      
+      // Update opened count if we have interaction data
+      if (interactionData && interactionData[thread.id]) {
+        stats.opened += interactionData[thread.id].opened ? 1 : 0;
+      }
+      
+      updatedCount++;
+    });
+    
+    this.lastScanTime = Date.now();
+    console.log(`[EmailAnalytics] Updated ${updatedCount} sender records`);
+    this.save();
+    
+    return updatedCount;
+  },
+  
+  // Extract sender's display name
+  extractSenderName(from) {
+    const match = from.match(/^"?([^"<]+)"?\s*(?:<.*>)?$/);
+    return match ? match[1].trim() : from;
+  },
+  
+  // Extract sender's email address
+  extractSenderEmail(from) {
+    const match = from.match(/<([^>]+)>/) || from.match(/([^\s<]+@[^\s>]+)/);
+    return match ? match[1].toLowerCase() : from.toLowerCase();
+  },
+  
+  // Extract domain from email
+  extractDomain(email) {
+    const match = email.match(/@([^>]+)$/);
+    return match ? match[1].toLowerCase() : '';
+  },
+  
+  // Guess sender category based on name and domain
+  guessSenderCategory(name, domain) {
+    // Simple categorization logic
+    const lowerName = name.toLowerCase();
+    const lowerDomain = domain.toLowerCase();
+    
+    // Newsletters and subscriptions
+    if (lowerName.includes('newsletter') || 
+        lowerName.includes('subscription') || 
+        lowerName.includes('weekly') || 
+        lowerName.includes('daily') ||
+        lowerName.includes('digest') ||
+        lowerName.includes('updates')) {
+      return 'newsletter';
+    }
+    
+    // Shopping and retail
+    if (lowerName.includes('shop') || 
+        lowerName.includes('store') || 
+        lowerName.includes('buy') || 
+        lowerName.includes('deal') ||
+        lowerName.includes('sale') ||
+        lowerDomain.includes('shop') ||
+        lowerDomain.includes('retail')) {
+      return 'shopping';
+    }
+    
+    // Social media
+    if (lowerDomain.includes('facebook') || 
+        lowerDomain.includes('instagram') || 
+        lowerDomain.includes('twitter') || 
+        lowerDomain.includes('linkedin') ||
+        lowerDomain.includes('tiktok')) {
+      return 'social';
+    }
+    
+    // Default category
+    return 'other';
+  },
+  
+  // Get top senders by frequency
+  getTopSenders(limit = 20) {
+    return Object.values(this.senderStats)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  },
+  
+  // Get rarely opened subscriptions
+  getRarelyOpenedSubscriptions() {
+    return Object.values(this.senderStats)
+      .filter(s => s.count >= 3 && s.opened === 0)
+      .sort((a, b) => b.count - a.count);
+  },
+  
+  // Get regular company emails
+  getRegularCompanyEmails(minEmails = 3, daysThreshold = 30) {
+    const nowTime = Date.now();
+    const dayInMs = 24 * 60 * 60 * 1000;
+    const daysThresholdMs = daysThreshold * dayInMs;
+    
+    // Find senders who've sent multiple emails in the past X days
+    return Object.values(this.senderStats)
+      .filter(s => {
+        return s.count >= minEmails && 
+               (nowTime - s.lastSeen) < daysThresholdMs &&
+               s.domain && // Has a valid domain
+               !s.domain.includes('gmail.com') && // Not a personal Gmail
+               !s.domain.includes('hotmail.com') && // Not a personal Hotmail
+               !s.domain.includes('outlook.com'); // Not a personal Outlook
+      })
+      .sort((a, b) => b.count - a.count);
+  },
+  
+  // Get total email count
+  getTotalEmailCount() {
+    return Object.values(this.senderStats).reduce((sum, s) => sum + s.count, 0);
+  }
+};

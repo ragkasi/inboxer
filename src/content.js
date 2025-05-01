@@ -1,6 +1,51 @@
 // Content script to interact with email pages
 console.log("Email Cleaner Content Script v1.0.5 loaded");
 
+// Global flag to track deletion operations
+let isDeleteOperationInProgress = false;
+
+// Add this code to protect the panel from being removed during deletion operations
+// Place it at the top level of the file after the global variables
+
+// Create a MutationObserver to detect if the panel is being removed during deletion
+const panelProtectionObserver = new MutationObserver((mutations) => {
+  // Skip if no deletion is in progress
+  if (!isDeleteOperationInProgress) return;
+  
+  for (const mutation of mutations) {
+    if (mutation.type === 'childList' && mutation.removedNodes.length > 0) {
+      // Check if our panel was removed
+      for (let i = 0; i < mutation.removedNodes.length; i++) {
+        const node = mutation.removedNodes[i];
+        if (node.id === 'email-cleaner-panel') {
+          console.log('⚠️ PANEL PROTECTION: Panel removed during deletion! Re-creating it.');
+          
+          // Stop current observation to avoid infinite loops
+          panelProtectionObserver.disconnect();
+          
+          // Create the panel again
+          setTimeout(() => {
+            showStandalonePanel();
+            // Resume observation
+            observePanelRemoval();
+          }, 100);
+          
+          // Break after handling the panel
+          break;
+        }
+      }
+    }
+  }
+});
+
+// Function to start observing for panel removal
+function observePanelRemoval() {
+  panelProtectionObserver.observe(document.body, { 
+    childList: true,
+    subtree: false
+  });
+}
+
 // Safety check and initialization for Chrome API
 (function initializeContentScript() {
   // Check if Chrome API is available
@@ -241,7 +286,7 @@ function showStandalonePanel() {
     cursor: 'pointer'
   });
   diagButton.onclick = (e) => {
-    e.stopPropagation();
+    e.stopPropagation(); // Prevent panel from closing
     testExtensionConnectivity();
   };
   header.appendChild(diagButton);
@@ -258,18 +303,106 @@ function showStandalonePanel() {
     padding: '0',
     lineHeight: '1'
   });
-  closeButton.onclick = removeStandalonePanel;
+  closeButton.onclick = (e) => {
+    e.stopPropagation(); // Prevent event propagation
+    removeStandalonePanel(true); // Force close
+  };
   header.appendChild(closeButton);
   
-  // Create content area
+  // Create tab navigation
+  const tabNav = document.createElement('div');
+  Object.assign(tabNav.style, {
+    display: 'flex',
+    borderBottom: '1px solid #e0e0e0',
+    backgroundColor: '#f8f8f8'
+  });
+  
+  // Tab content container
   const content = document.createElement('div');
+  content.id = 'email-cleaner-content';
   Object.assign(content.style, {
     padding: '16px',
     overflowY: 'auto',
-    height: 'calc(100% - 45px)', // Subtract header height
+    height: 'calc(100% - 86px)', // Subtract header and tabs height
     boxSizing: 'border-box'
   });
   
+  // Define tabs
+  const tabs = [
+    { id: 'emails', label: 'Emails' },
+    { id: 'subscriptions', label: 'Subscriptions' },
+    { id: 'analytics', label: 'Analytics' },
+    { id: 'settings', label: 'Settings' }
+  ];
+  
+  // Create tabs
+  tabs.forEach((tab, index) => {
+    const tabButton = document.createElement('button');
+    tabButton.textContent = tab.label;
+    tabButton.dataset.tabId = tab.id;
+    Object.assign(tabButton.style, {
+      padding: '10px 16px',
+      border: 'none',
+      background: 'none',
+      cursor: 'pointer',
+      fontSize: '14px',
+      fontWeight: index === 0 ? 'bold' : 'normal',
+      borderBottom: index === 0 ? '2px solid #4285f4' : 'none',
+      color: index === 0 ? '#4285f4' : '#666'
+    });
+    
+    tabButton.onclick = (e) => {
+      e.stopPropagation(); // Prevent panel from closing when switching tabs
+      
+      // Update tab buttons
+      Array.from(tabNav.children).forEach(btn => {
+        btn.style.fontWeight = 'normal';
+        btn.style.borderBottom = 'none';
+        btn.style.color = '#666';
+      });
+      tabButton.style.fontWeight = 'bold';
+      tabButton.style.borderBottom = '2px solid #4285f4';
+      tabButton.style.color = '#4285f4';
+      
+      // Update content
+      showTabContent(tab.id);
+    };
+    
+    tabNav.appendChild(tabButton);
+  });
+  
+  // Add components to panel
+  panel.appendChild(header);
+  panel.appendChild(tabNav);
+  panel.appendChild(content);
+  
+  // Prevent panel from closing when clicking inside it
+  panel.onclick = (e) => {
+    e.stopPropagation();
+  };
+  
+  // Add to page
+  document.body.appendChild(panel);
+  
+  // Start observing for panel removal
+  observePanelRemoval();
+  
+  // Animate in after a short delay
+  setTimeout(() => {
+    panel.style.transform = 'translateX(0)';
+  }, 10);
+  
+  // Add event listener for closing when clicking outside
+  document.addEventListener('click', handleOutsideClick);
+  
+  // Show default tab (emails)
+  showTabContent('emails');
+  
+  return panel;
+}
+
+// Tab content creators
+function createEmailsTab(container) {
   // Create a loading indicator
   const loader = document.createElement('div');
   loader.id = 'email-cleaner-loader';
@@ -279,7 +412,7 @@ function showStandalonePanel() {
     color: '#666'
   });
   loader.textContent = 'Analyzing emails...';
-  content.appendChild(loader);
+  container.appendChild(loader);
   
   // Add info text
   const info = document.createElement('p');
@@ -289,7 +422,7 @@ function showStandalonePanel() {
     color: '#666',
     fontSize: '14px'
   });
-  content.appendChild(info);
+  container.appendChild(info);
   
   // Add help text for deletion
   const helpText = document.createElement('div');
@@ -315,7 +448,7 @@ function showStandalonePanel() {
     </ol>
     <p><strong>Troubleshooting:</strong> If Delete All doesn't work, try reloading the page and starting again.</p>
   `;
-  content.appendChild(helpText);
+  container.appendChild(helpText);
   
   // Show the help text after a delay
   setTimeout(() => {
@@ -341,61 +474,940 @@ function showStandalonePanel() {
   connectButton.onclick = () => {
     tryConnectGmail();
   };
-  content.appendChild(connectButton);
+  container.appendChild(connectButton);
   
   // Create email groups container
   const groupsContainer = document.createElement('div');
   groupsContainer.id = 'email-cleaner-groups';
-  content.appendChild(groupsContainer);
-  
-  // Add components to panel
-  panel.appendChild(header);
-  panel.appendChild(content);
-  
-  // Add to page
-  document.body.appendChild(panel);
-  
-  // Animate in after a short delay
-  setTimeout(() => {
-    panel.style.transform = 'translateX(0)';
-  }, 10);
-  
-  // Add event listener for closing when clicking outside
-  document.addEventListener('click', handleOutsideClick);
+  container.appendChild(groupsContainer);
   
   // Try to load emails immediately
   setTimeout(() => {
     tryLoadEmails();
   }, 500);
+}
+
+function createSubscriptionsTab(container) {
+  // Add description
+  const description = document.createElement('p');
+  description.textContent = 'Manage your email subscriptions. This tab shows newsletters and promotional emails you rarely open.';
+  container.appendChild(description);
   
-  return panel;
+  // Add loading indicator
+  const loader = document.createElement('div');
+  loader.textContent = 'Loading subscription data...';
+  Object.assign(loader.style, {
+    textAlign: 'center',
+    padding: '20px',
+    color: '#666'
+  });
+  container.appendChild(loader);
+  
+  // Create subscriptions container
+  const subscriptionsContainer = document.createElement('div');
+  subscriptionsContainer.id = 'subscriptions-container';
+  container.appendChild(subscriptionsContainer);
+  
+  // Load the subscriptions data
+  safelyCallChromeAPI(
+    // API call
+    () => {
+      console.log("Requesting subscription data with email details");
+      chrome.runtime.sendMessage({ 
+        type: 'GET_SUBSCRIPTIONS',
+        includeEmails: true  // Request full email details
+      }, response => {
+        // Remove loader
+        if (loader.parentNode) {
+          loader.parentNode.removeChild(loader);
+        }
+        
+        if (chrome.runtime.lastError) {
+          console.error('Error loading subscriptions:', chrome.runtime.lastError);
+          showError('Could not load subscription data. Please try again later.');
+          return;
+        }
+        
+        if (!response || !response.success) {
+          console.error('Error response:', response);
+          showError('Could not load subscription data: ' + (response?.error || 'Unknown error'));
+          return;
+        }
+        
+        // Show subscriptions
+        displaySubscriptions(response.subscriptions || []);
+      });
+    },
+    // Fallback
+    () => {
+      // Remove loader
+      if (loader.parentNode) {
+        loader.parentNode.removeChild(loader);
+      }
+      showError('Could not connect to extension. Please try again later.');
+    }
+  );
+  
+  // Helper to show error
+  function showError(message) {
+    const errorElem = document.createElement('div');
+    
+    // If the error is an object, try to extract useful information
+    if (typeof message === 'object') {
+      try {
+        message = JSON.stringify(message, null, 2);
+      } catch (e) {
+        message = 'Unknown error (cannot display details)';
+      }
+    }
+    
+    errorElem.textContent = message;
+    Object.assign(errorElem.style, {
+      color: '#d32f2f',
+      padding: '16px',
+      textAlign: 'center',
+      backgroundColor: '#ffebee',
+      borderRadius: '4px',
+      marginTop: '16px'
+    });
+    subscriptionsContainer.appendChild(errorElem);
+    
+    // Add a retry button
+    const retryButton = document.createElement('button');
+    retryButton.textContent = 'Retry';
+    Object.assign(retryButton.style, {
+      backgroundColor: '#4285f4',
+      color: 'white',
+      border: 'none',
+      borderRadius: '4px',
+      padding: '8px 16px',
+      fontSize: '14px',
+      cursor: 'pointer',
+      margin: '10px auto',
+      display: 'block'
+    });
+    retryButton.onclick = () => {
+      // Reload the tab
+      const tabButton = Array.from(document.querySelectorAll('button'))
+        .find(btn => btn.dataset.tabId === 'subscriptions');
+      if (tabButton) {
+        tabButton.click();
+      }
+    };
+    subscriptionsContainer.appendChild(retryButton);
+  }
+  
+  // Helper to display subscriptions
+  function displaySubscriptions(subscriptions) {
+    if (subscriptions.length === 0) {
+      const noDataElem = document.createElement('div');
+      noDataElem.textContent = 'No subscription data available yet. Please open more emails to build up analytics data.';
+      Object.assign(noDataElem.style, {
+        padding: '16px',
+        textAlign: 'center',
+        color: '#666'
+      });
+      subscriptionsContainer.appendChild(noDataElem);
+      return;
+    }
+    
+    // Create a list of subscriptions
+    const subsList = document.createElement('div');
+    Object.assign(subsList.style, {
+      marginTop: '16px'
+    });
+    
+    // Add each subscription
+    subscriptions.forEach(sub => {
+      const subItem = document.createElement('div');
+      Object.assign(subItem.style, {
+        padding: '12px',
+        borderBottom: '1px solid #eee',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center'
+      });
+      
+      // Sender info
+      const senderInfo = document.createElement('div');
+      
+      // Create name element with category badge
+      const nameContainer = document.createElement('div');
+      Object.assign(nameContainer.style, {
+        display: 'flex',
+        alignItems: 'center',
+        marginBottom: '4px'
+      });
+      
+      const nameElem = document.createElement('strong');
+      nameElem.textContent = sub.name;
+      nameContainer.appendChild(nameElem);
+      
+      // Category badge if available
+      if (sub.categoryGuess) {
+        const badge = document.createElement('span');
+        badge.textContent = sub.categoryGuess;
+        Object.assign(badge.style, {
+          fontSize: '10px',
+          backgroundColor: '#f1f1f1',
+          color: '#666',
+          borderRadius: '10px',
+          padding: '2px 6px',
+          marginLeft: '8px'
+        });
+        nameContainer.appendChild(badge);
+      }
+      
+      senderInfo.appendChild(nameContainer);
+      
+      // Email and stats
+      const emailElem = document.createElement('div');
+      emailElem.textContent = sub.email;
+      Object.assign(emailElem.style, {
+        fontSize: '12px',
+        color: '#666'
+      });
+      senderInfo.appendChild(emailElem);
+      
+      // Stats
+      const statsElem = document.createElement('div');
+      statsElem.textContent = `${sub.count} emails received, ${sub.opened} opened`;
+      Object.assign(statsElem.style, {
+        fontSize: '12px',
+        color: '#666',
+        marginTop: '2px'
+      });
+      senderInfo.appendChild(statsElem);
+      
+      subItem.appendChild(senderInfo);
+      
+      // Actions
+      const actionsDiv = document.createElement('div');
+      
+      // Delete button with more aggressive event handling
+      const deleteBtn = document.createElement('button');
+      deleteBtn.textContent = 'Delete All';
+      Object.assign(deleteBtn.style, {
+        backgroundColor: '#f44336',
+        color: 'white',
+        border: 'none',
+        borderRadius: '4px',
+        padding: '6px 12px',
+        marginRight: '8px',
+        cursor: 'pointer'
+      });
+      
+      // Delete button with additional event protections
+      deleteBtn.addEventListener('click', function(event) {
+        // Stop propagation at capture phase
+        event.stopPropagation();
+        event.preventDefault();
+        
+        console.log('Subscription Delete button clicked, preventing default and propagation');
+        
+        // Extract message IDs from subscription emails if they exist
+        const messageIds = sub.emails ? extractMessageIds(sub.emails) : [];
+        
+        if (messageIds.length === 0) {
+          createNotification(`No emails found for ${sub.name}`);
+          return;
+        }
+        
+        // Update UI to indicate deletion in progress
+        this.textContent = 'Deleting...';
+        this.disabled = true;
+        
+        // Use long-lived port connection
+        deleteWithPortConnection(messageIds, this, null, null);
+        
+        // Return false for older browsers
+        return false;
+      });
+      
+      // Also prevent mousedown and mouseup from bubbling
+      deleteBtn.addEventListener('mousedown', function(event) {
+        event.stopPropagation();
+      });
+      
+      deleteBtn.addEventListener('mouseup', function(event) {
+        event.stopPropagation();
+      });
+      
+      actionsDiv.appendChild(deleteBtn);
+      
+      // Unsubscribe button
+      const unsubBtn = document.createElement('button');
+      unsubBtn.textContent = 'Unsubscribe';
+      Object.assign(unsubBtn.style, {
+        backgroundColor: '#9e9e9e',
+        color: 'white',
+        border: 'none',
+        borderRadius: '4px',
+        padding: '6px 12px',
+        cursor: 'pointer'
+      });
+      unsubBtn.onclick = () => handleUnsubscribe(sub);
+      actionsDiv.appendChild(unsubBtn);
+      
+      subItem.appendChild(actionsDiv);
+      subsList.appendChild(subItem);
+    });
+    
+    subscriptionsContainer.appendChild(subsList);
+  }
+  
+  // Handle deletion of subscription emails
+  function handleSubscriptionDelete(subscription, event) {
+    // Stop event propagation to prevent it from closing the panel
+    event.stopPropagation();
+    console.log("Deleting subscription:", subscription);
+    
+    // Extract message IDs from subscription emails if they exist
+    let messageIds = [];
+    
+    if (subscription.emails && Array.isArray(subscription.emails)) {
+      messageIds = extractMessageIds(subscription.emails);
+      console.log(`Extracted ${messageIds.length} message IDs from subscription emails`);
+    }
+    
+    if (messageIds.length === 0) {
+      createNotification(`No emails found for ${subscription.name || subscription.email}. Try reloading and try again.`);
+      return;
+    }
+    
+    // Find the delete button and update its state
+    const deleteBtn = event.target;
+    if (deleteBtn) {
+      deleteBtn.textContent = 'Deleting...';
+      deleteBtn.disabled = true;
+    }
+    
+    // Use the existing deletion connection
+    deleteWithPortConnection(messageIds, deleteBtn, null, null);
+  }
+  
+  // Handle unsubscribe action
+  function handleUnsubscribe(subscription) {
+    // Implementation for unsubscribe functionality
+    // For now, show a notification that this is coming soon
+    createNotification(`Unsubscribe from ${subscription.name} - Coming soon!`);
+  }
+}
+
+// Function to display the analytics tab content
+function createAnalyticsTab(container) {
+  // Add description
+  const description = document.createElement('p');
+  description.textContent = 'Email Analytics helps you understand your email patterns and identify opportunities to clean your inbox.';
+  container.appendChild(description);
+  
+  // Add loading indicator
+  const loader = document.createElement('div');
+  loader.textContent = 'Loading analytics data...';
+  Object.assign(loader.style, {
+    textAlign: 'center',
+    padding: '20px',
+    color: '#666'
+  });
+  container.appendChild(loader);
+  
+  // Create analytics container
+  const analyticsContainer = document.createElement('div');
+  analyticsContainer.id = 'analytics-container';
+  container.appendChild(analyticsContainer);
+  
+  // Load the analytics data
+  safelyCallChromeAPI(
+    // API call
+    () => {
+      chrome.runtime.sendMessage({ 
+        type: 'GET_EMAIL_ANALYTICS'
+      }, response => {
+        // Remove loader
+        if (loader.parentNode) {
+          loader.parentNode.removeChild(loader);
+        }
+        
+        if (chrome.runtime.lastError) {
+          console.error('Error loading analytics:', chrome.runtime.lastError);
+          showError('Could not load analytics data. Please try again later.');
+          return;
+        }
+        
+        if (!response || !response.success) {
+          console.error('Error response:', response);
+          showError('Could not load analytics data: ' + (response?.error || 'Unknown error'));
+          return;
+        }
+        
+        // Show analytics
+        displayAnalytics(response.analytics || {});
+      });
+    },
+    // Fallback
+    () => {
+      // Remove loader
+      if (loader.parentNode) {
+        loader.parentNode.removeChild(loader);
+      }
+      showError('Could not connect to extension. Please try again later.');
+    }
+  );
+  
+  // Helper to display analytics
+  function displayAnalytics(analytics) {
+    if (!analytics.topSenders || analytics.topSenders.length === 0) {
+      const noDataElem = document.createElement('div');
+      noDataElem.textContent = 'No analytics data available yet. Please scan your emails first.';
+      Object.assign(noDataElem.style, {
+        padding: '16px',
+        textAlign: 'center',
+        color: '#666'
+      });
+      analyticsContainer.appendChild(noDataElem);
+      
+      // Add scan button
+      const scanButton = document.createElement('button');
+      scanButton.textContent = 'Scan My Inbox';
+      Object.assign(scanButton.style, {
+        backgroundColor: '#4285f4',
+        color: 'white',
+        border: 'none',
+        borderRadius: '4px',
+        padding: '10px 16px',
+        fontSize: '14px',
+        fontWeight: 'bold',
+        cursor: 'pointer',
+        margin: '10px auto',
+        display: 'block'
+      });
+      scanButton.onclick = () => {
+        scanButton.disabled = true;
+        scanButton.textContent = 'Scanning...';
+        triggerEmailScan();
+      };
+      analyticsContainer.appendChild(scanButton);
+      
+      return;
+    }
+    
+    // Create analytics sections
+    const topSendersSection = createAnalyticsSection('Top Email Senders', analytics.topSenders);
+    analyticsContainer.appendChild(topSendersSection);
+    
+    const companiesSection = createAnalyticsSection('Regular Company Emails', analytics.regularCompanies);
+    analyticsContainer.appendChild(companiesSection);
+    
+    const inboxStatsSection = createStatsSection('Inbox Statistics', analytics.stats);
+    analyticsContainer.appendChild(inboxStatsSection);
+  }
+  
+  // Create a section for the analytics display
+  function createAnalyticsSection(title, data) {
+    const section = document.createElement('div');
+    Object.assign(section.style, {
+      marginBottom: '24px'
+    });
+    
+    const titleElem = document.createElement('h4');
+    titleElem.textContent = title;
+    Object.assign(titleElem.style, {
+      marginBottom: '12px',
+      borderBottom: '1px solid #eee',
+      paddingBottom: '8px'
+    });
+    section.appendChild(titleElem);
+    
+    if (!data || data.length === 0) {
+      const noDataElem = document.createElement('p');
+      noDataElem.textContent = 'No data available';
+      Object.assign(noDataElem.style, {
+        color: '#666',
+        fontStyle: 'italic'
+      });
+      section.appendChild(noDataElem);
+      return section;
+    }
+    
+    // Create data list
+    const list = document.createElement('div');
+    
+    data.forEach(item => {
+      const listItem = document.createElement('div');
+      Object.assign(listItem.style, {
+        display: 'flex',
+        justifyContent: 'space-between',
+        padding: '8px 0',
+        borderBottom: '1px solid #f5f5f5'
+      });
+      
+      const nameElem = document.createElement('div');
+      nameElem.textContent = item.name;
+      listItem.appendChild(nameElem);
+      
+      const countElem = document.createElement('div');
+      countElem.textContent = `${item.count} emails`;
+      Object.assign(countElem.style, {
+        color: '#666'
+      });
+      listItem.appendChild(countElem);
+      
+      list.appendChild(listItem);
+    });
+    
+    section.appendChild(list);
+    return section;
+  }
+  
+  // Create a section for statistics
+  function createStatsSection(title, stats) {
+    const section = document.createElement('div');
+    Object.assign(section.style, {
+      marginBottom: '24px'
+    });
+    
+    const titleElem = document.createElement('h4');
+    titleElem.textContent = title;
+    Object.assign(titleElem.style, {
+      marginBottom: '12px',
+      borderBottom: '1px solid #eee',
+      paddingBottom: '8px'
+    });
+    section.appendChild(titleElem);
+    
+    if (!stats) {
+      const noDataElem = document.createElement('p');
+      noDataElem.textContent = 'No statistics available';
+      Object.assign(noDataElem.style, {
+        color: '#666',
+        fontStyle: 'italic'
+      });
+      section.appendChild(noDataElem);
+      return section;
+    }
+    
+    // Create stats grid
+    const grid = document.createElement('div');
+    Object.assign(grid.style, {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(2, 1fr)',
+      gap: '16px'
+    });
+    
+    // Add stats
+    const statsToShow = [
+      { label: 'Total Senders', value: stats.totalSenders || 0 },
+      { label: 'Total Emails', value: stats.totalEmails || 0 },
+      { label: 'Newsletters', value: stats.newsletters || 0 },
+      { label: 'Shopping', value: stats.shopping || 0 }
+    ];
+    
+    statsToShow.forEach(stat => {
+      const statItem = document.createElement('div');
+      Object.assign(statItem.style, {
+        padding: '12px',
+        backgroundColor: '#f5f5f5',
+        borderRadius: '4px',
+        textAlign: 'center'
+      });
+      
+      const valueElem = document.createElement('div');
+      valueElem.textContent = stat.value;
+      Object.assign(valueElem.style, {
+        fontSize: '24px',
+        fontWeight: 'bold',
+        color: '#4285f4'
+      });
+      statItem.appendChild(valueElem);
+      
+      const labelElem = document.createElement('div');
+      labelElem.textContent = stat.label;
+      Object.assign(labelElem.style, {
+        fontSize: '12px',
+        color: '#666',
+        marginTop: '4px'
+      });
+      statItem.appendChild(labelElem);
+      
+      grid.appendChild(statItem);
+    });
+    
+    section.appendChild(grid);
+    return section;
+  }
+  
+  // Trigger a scan of the user's emails
+  function triggerEmailScan() {
+    safelyCallChromeAPI(
+      // API call
+      () => {
+        chrome.runtime.sendMessage({ 
+          type: 'SCAN_EMAILS'
+        }, response => {
+          if (chrome.runtime.lastError) {
+            console.error('Error scanning emails:', chrome.runtime.lastError);
+            createNotification('Error scanning emails: ' + chrome.runtime.lastError.message);
+            return;
+          }
+          
+          if (!response || !response.success) {
+            console.error('Scan error:', response);
+            createNotification('Error scanning emails: ' + (response?.error || 'Unknown error'));
+            return;
+          }
+          
+          // Show success and reload the tab
+          createNotification(`Scanned ${response.count || 0} emails successfully!`);
+  setTimeout(() => {
+            // Reload the analytics tab
+            const analyticsButton = Array.from(document.querySelectorAll('button'))
+              .find(btn => btn.dataset.tabId === 'analytics');
+            if (analyticsButton) {
+              analyticsButton.click();
+            }
+          }, 1000);
+        });
+      },
+      // Fallback
+      () => {
+        createNotification('Could not connect to the extension. Please try again.');
+      }
+    );
+  }
+}
+
+// Function to display the settings tab content
+function createSettingsTab(container) {
+  // Add description
+  const description = document.createElement('p');
+  description.textContent = 'Configure Email Cleaner settings and automation.';
+  container.appendChild(description);
+  
+  // Create settings form
+  const form = document.createElement('div');
+  Object.assign(form.style, {
+    marginTop: '20px'
+  });
+  
+  // Auto-clean section
+  const autoCleanSection = document.createElement('div');
+  Object.assign(autoCleanSection.style, {
+    marginBottom: '24px',
+    padding: '16px',
+    backgroundColor: '#f5f5f5',
+    borderRadius: '4px'
+  });
+  
+  const autoCleanTitle = document.createElement('h4');
+  autoCleanTitle.textContent = 'Automatic Cleaning';
+  Object.assign(autoCleanTitle.style, {
+    marginTop: '0',
+    marginBottom: '16px'
+  });
+  autoCleanSection.appendChild(autoCleanTitle);
+  
+  // Auto-clean toggle
+  const autoCleanToggleContainer = document.createElement('div');
+  Object.assign(autoCleanToggleContainer.style, {
+    display: 'flex',
+    alignItems: 'center',
+    marginBottom: '16px'
+  });
+  
+  const autoCleanToggle = document.createElement('input');
+  autoCleanToggle.type = 'checkbox';
+  autoCleanToggle.id = 'auto-clean-toggle';
+  autoCleanSection.appendChild(autoCleanToggleContainer);
+  
+  const autoCleanLabel = document.createElement('label');
+  autoCleanLabel.htmlFor = 'auto-clean-toggle';
+  autoCleanLabel.textContent = 'Enable automatic inbox cleaning';
+  Object.assign(autoCleanLabel.style, {
+    marginLeft: '8px'
+  });
+  
+  autoCleanToggleContainer.appendChild(autoCleanToggle);
+  autoCleanToggleContainer.appendChild(autoCleanLabel);
+  
+  // Interval selector
+  const intervalContainer = document.createElement('div');
+  Object.assign(intervalContainer.style, {
+    marginBottom: '16px'
+  });
+  
+  const intervalLabel = document.createElement('label');
+  intervalLabel.htmlFor = 'clean-interval';
+  intervalLabel.textContent = 'Clean inbox every:';
+  Object.assign(intervalLabel.style, {
+    display: 'block',
+    marginBottom: '8px'
+  });
+  intervalContainer.appendChild(intervalLabel);
+  
+  const intervalSelect = document.createElement('select');
+  intervalSelect.id = 'clean-interval';
+  Object.assign(intervalSelect.style, {
+    width: '100%',
+    padding: '8px',
+    borderRadius: '4px',
+    border: '1px solid #ddd'
+  });
+  
+  // Add interval options
+  const intervals = [
+    { value: 'daily', label: 'Daily' },
+    { value: 'weekly', label: 'Weekly' },
+    { value: 'monthly', label: 'Monthly' }
+  ];
+  
+  intervals.forEach(interval => {
+    const option = document.createElement('option');
+    option.value = interval.value;
+    option.textContent = interval.label;
+    intervalSelect.appendChild(option);
+  });
+  
+  intervalContainer.appendChild(intervalSelect);
+  autoCleanSection.appendChild(intervalContainer);
+  
+  // Save button
+  const saveButton = document.createElement('button');
+  saveButton.textContent = 'Save Settings';
+  Object.assign(saveButton.style, {
+    backgroundColor: '#4285f4',
+    color: 'white',
+    border: 'none',
+    borderRadius: '4px',
+    padding: '10px 16px',
+    fontSize: '14px',
+    cursor: 'pointer',
+    width: '100%'
+  });
+  saveButton.onclick = saveSettings;
+  autoCleanSection.appendChild(saveButton);
+  
+  form.appendChild(autoCleanSection);
+  
+  // Coming soon section
+  const comingSoonSection = document.createElement('div');
+  Object.assign(comingSoonSection.style, {
+    marginTop: '24px',
+    padding: '16px',
+    backgroundColor: '#e8f5e9',
+    borderRadius: '4px',
+    textAlign: 'center'
+  });
+  
+  const comingSoonTitle = document.createElement('h4');
+  comingSoonTitle.textContent = 'Coming Soon';
+  Object.assign(comingSoonTitle.style, {
+    marginTop: '0',
+    color: '#2e7d32'
+  });
+  comingSoonSection.appendChild(comingSoonTitle);
+  
+  const comingSoonText = document.createElement('p');
+  comingSoonText.textContent = 'Advanced features including auto-unsubscribe, digest mode, and premium filters are coming soon!';
+  comingSoonSection.appendChild(comingSoonText);
+  
+  form.appendChild(comingSoonSection);
+  
+  container.appendChild(form);
+  
+  // Load current settings
+  loadSettings();
+  
+  // Helper to load settings
+  function loadSettings() {
+    safelyCallChromeAPI(
+      // API call
+      () => {
+        chrome.runtime.sendMessage({ 
+          type: 'GET_SETTINGS'
+        }, response => {
+          if (chrome.runtime.lastError) {
+            console.error('Error loading settings:', chrome.runtime.lastError);
+            debugLogObject('Chrome Runtime Last Error', chrome.runtime.lastError);
+            createNotification('Error loading settings: ' + (chrome.runtime.lastError.message || 'Unknown error'));
+            return;
+          }
+          
+          if (!response || !response.success) {
+            console.error('Settings error:', response);
+            debugLogObject('Settings Response Error', response);
+            
+            // Enhanced error handling to debug the [object Object] issue
+            let errorMessage = 'Unknown error';
+            
+            if (response && response.error) {
+              debugLogObject('Response Error Object', response.error);
+              
+              // Explicit handling of different error types
+              if (typeof response.error === 'string') {
+                errorMessage = response.error;
+              } else if (typeof response.error === 'object') {
+                if (response.error === null) {
+                  errorMessage = 'Null error object received';
+                } else if (response.error.message) {
+                  errorMessage = response.error.message;
+                } else {
+                  try {
+                    errorMessage = JSON.stringify(response.error);
+                  } catch (e) {
+                    errorMessage = 'Complex error object (cannot stringify)';
+                  }
+                }
+              } else {
+                errorMessage = String(response.error);
+              }
+            }
+            
+            createNotification('Error loading settings: ' + errorMessage);
+            return;
+          }
+          
+          // Update form with settings
+          const settings = response.settings || {};
+          autoCleanToggle.checked = settings.autoCleanEnabled || false;
+          
+          if (settings.autoCleanInterval) {
+            if (settings.autoCleanInterval === 1) {
+              intervalSelect.value = 'daily';
+            } else if (settings.autoCleanInterval === 7) {
+              intervalSelect.value = 'weekly';
+            } else if (settings.autoCleanInterval === 30) {
+              intervalSelect.value = 'monthly';
+            }
+          }
+        });
+      },
+      // Fallback
+      () => {
+        console.error('Could not connect to extension to load settings');
+        createNotification('Could not connect to extension to load settings');
+      }
+    );
+  }
+  
+  // Helper to save settings
+  function saveSettings() {
+    const intervalValues = {
+      'daily': 1,
+      'weekly': 7,
+      'monthly': 30
+    };
+    
+    const settings = {
+      autoCleanEnabled: autoCleanToggle.checked,
+      autoCleanInterval: intervalValues[intervalSelect.value] || 7
+    };
+    
+    safelyCallChromeAPI(
+      // API call
+      () => {
+        chrome.runtime.sendMessage({
+          type: 'SAVE_SETTINGS',
+          settings: settings
+        }, response => {
+          if (chrome.runtime.lastError) {
+            console.error('Error saving settings:', chrome.runtime.lastError);
+            debugLogObject('Chrome Runtime Last Error', chrome.runtime.lastError);
+            createNotification('Error saving settings: ' + (chrome.runtime.lastError.message || 'Unknown error'));
+            return;
+          }
+          
+          if (!response || !response.success) {
+            console.error('Save settings error:', response);
+            debugLogObject('Settings Save Response Error', response);
+            
+            // Enhanced error handling to debug the [object Object] issue
+            let errorMessage = 'Unknown error';
+            
+            if (response && response.error) {
+              debugLogObject('Save Response Error Object', response.error);
+              
+              // Explicit handling of different error types
+              if (typeof response.error === 'string') {
+                errorMessage = response.error;
+              } else if (typeof response.error === 'object') {
+                if (response.error === null) {
+                  errorMessage = 'Null error object received';
+                } else if (response.error.message) {
+                  errorMessage = response.error.message;
+                } else {
+                  try {
+                    errorMessage = JSON.stringify(response.error);
+                  } catch (e) {
+                    errorMessage = 'Complex error object (cannot stringify)';
+                  }
+                }
+              } else {
+                errorMessage = String(response.error);
+              }
+            }
+            
+            createNotification('Error saving settings: ' + errorMessage);
+            return;
+          }
+          
+          createNotification('Settings saved successfully');
+        });
+      },
+      // Fallback
+      () => {
+        createNotification('Could not connect to extension to save settings');
+      }
+    );
+  }
 }
 
 // Function to remove the standalone panel
-function removeStandalonePanel() {
+function removeStandalonePanel(force = false) {
+  console.log("Attempting to remove panel, force:", force, "deletion in progress:", isDeleteOperationInProgress);
+  
+  // Extra defensive check - if deletion is happening, don't close unless forced
+  if (!force && isDeleteOperationInProgress) {
+    console.log('PREVENTED: Deletion in progress, panel close prevented');
+    return false; // Indicate closure was prevented
+  }
+  
   const panel = document.getElementById('email-cleaner-panel');
   if (panel) {
+    console.log('Removing panel');
+    
     // Animate out
     panel.style.transform = 'translateX(450px)';
     
     // Remove after animation completes
     setTimeout(() => {
-      if (panel.parentNode) {
+      if (panel && panel.parentNode) {
         document.body.removeChild(panel);
+        console.log('Panel removed from DOM');
       }
     }, 300);
     
     // Remove click listener
     document.removeEventListener('click', handleOutsideClick);
+    return true; // Indicate panel was closed
   }
+  return false; // Panel wasn't found
 }
 
 // Handle clicks outside the panel to close it
 function handleOutsideClick(event) {
+  // If deletion is in progress, don't allow closing via outside click
+  if (isDeleteOperationInProgress) {
+    console.log('IGNORED outside click: deletion in progress');
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  
   const panel = document.getElementById('email-cleaner-panel');
   const button = document.getElementById('email-cleaner-button');
   
   if (panel && !panel.contains(event.target) && event.target !== button) {
+    console.log('Outside click detected, closing panel');
     removeStandalonePanel();
   }
 }
@@ -663,7 +1675,7 @@ function displayEmails(threads) {
     
     header.appendChild(senderInfo);
     
-    // Delete all button
+    // Delete all button with more aggressive event handling
     const deleteButton = document.createElement('button');
     deleteButton.textContent = 'Delete All';
     Object.assign(deleteButton.style, {
@@ -676,8 +1688,14 @@ function displayEmails(threads) {
       cursor: 'pointer'
     });
     
-    // Delete all handler
-    deleteButton.onclick = () => {
+    // Delete all handler with additional event protections
+    deleteButton.addEventListener('click', function(event) {
+      // Stop propagation at capture phase
+      event.stopPropagation();
+      event.preventDefault();
+      
+      console.log('Delete All button clicked, preventing default and propagation');
+      
       // Extract message IDs
       const messageIds = extractMessageIds(group.emails);
       
@@ -687,144 +1705,24 @@ function displayEmails(threads) {
       }
       
       // Update UI to indicate deletion in progress
-      deleteButton.textContent = 'Deleting...';
-      deleteButton.disabled = true;
+      this.textContent = 'Deleting...';
+      this.disabled = true;
       
       // Use long-lived port connection
-      deleteWithPortConnection(messageIds);
+      deleteWithPortConnection(messageIds, this, groupElement, groupsContainer);
       
-      // Delete emails using a long-lived port connection
-      function deleteWithPortConnection(ids) {
-        let port = null;
-        let portTimeout = null;
-        let lastProgressMessage = 'Starting...';
-        let operationCompleted = false;
-
-        try {
-          createNotification('Connecting to Gmail...');
-          
-          port = chrome.runtime.connect({ name: 'gmail_deletion' });
-          
-          // Listen for messages
-          port.onMessage.addListener((response) => {
-            console.log('[Port Listener] Message:', response);
-            // Reset timeout on any message activity
-            clearTimeout(portTimeout);
-            startPortTimeout(); 
-            
-            switch (response.type) {
-              case 'ACKNOWLEDGED':
-                lastProgressMessage = 'Request received by background...';
-                createNotification(lastProgressMessage);
-                break;
-              case 'AUTH_SUCCESS':
-                lastProgressMessage = 'Authenticated. Initializing...';
-                createNotification(lastProgressMessage);
-                break;
-              case 'DELETE_PROGRESS':
-                lastProgressMessage = response.message || 'Processing...';
-                createNotification(lastProgressMessage);
-                break;
-              case 'DELETE_SUCCESS':
-                operationCompleted = true;
-                cleanupAndFinish(null, response.count);
-                break;
-              case 'ERROR':
-                operationCompleted = true;
-                cleanupAndFinish(response.error || 'Unknown error');
-                break;
-              default:
-                 console.warn('[Port Listener] Unknown message type:', response.type);
-            }
-          });
-          
-          // Handle disconnection
-          port.onDisconnect.addListener(() => {
-            console.log('[Port Disconnect] Port disconnected.');
-            clearTimeout(portTimeout);
-            // Only show error if the operation wasn't explicitly completed
-            if (!operationCompleted) {
-              const errorMsg = chrome.runtime.lastError ? 
-                  `Connection lost: ${chrome.runtime.lastError.message}` : 
-                  'Connection lost unexpectedly.';
-              deleteFailed(errorMsg + ` (Last status: ${lastProgressMessage})`);
-            }
-            port = null; // Ensure port is marked as null
-          });
-          
-          // Send initial request
-          port.postMessage({
-            type: 'DELETE_EMAILS',
-            service: 'gmail',
-            messageIds: ids
-          });
-          
-          // Start initial timeout
-          startPortTimeout();
-          
-        } catch (error) {
-          console.error('[Port Setup] Error:', error);
-          cleanupAndFinish('Failed to connect: ' + error.message);
-        }
-        
-        // Helper to start/reset the inactivity timeout
-        function startPortTimeout() {
-          clearTimeout(portTimeout);
-          portTimeout = setTimeout(() => {
-            console.warn('[Port Timeout] No activity for 60 seconds.');
-            cleanupAndFinish('Operation timed out due to inactivity. Please try again.');
-          }, 60000); // 60 second timeout
-        }
-        
-        // Helper to clean up resources and finalize UI
-        function cleanupAndFinish(error = null, count = 0) {
-           clearTimeout(portTimeout);
-           if (port) {
-              try { port.disconnect(); } catch(e){} 
-              port = null;
-           }
-           
-           if (error) {
-              deleteFailed(error);
-           } else {
-              deleteSuccessful(count);
-           }
-        }
-      }
-      
-      function deleteFailed(message = 'Failed to delete emails.') {
-        console.error('Delete operation failed:', message);
-        createNotification(message);
-        deleteButton.textContent = 'Delete All';
-        deleteButton.disabled = false;
-      }
-      
-      function deleteSuccessful(count) {
-        createNotification(`Successfully deleted ${count} email${count !== 1 ? 's' : ''}`);
-        
-        // Remove this group from the UI
-        if (groupElement.parentNode) {
-          groupElement.parentNode.removeChild(groupElement);
-        }
-        
-        // If no groups left, show message
-        if (groupsContainer.children.length === 0) {
-          // Replace innerHTML with DOM creation
-          const noEmailsText = document.createElement('p');
-          noEmailsText.textContent = 'No emails remaining';
-          noEmailsText.style.textAlign = 'center';
-          noEmailsText.style.color = '#666';
-          groupsContainer.appendChild(noEmailsText);
-        }
-        
-        // Refresh the inbox after a short delay
-        console.log('Deletion successful, scheduling inbox refresh...');
-        setTimeout(() => {
-          console.log('Executing scheduled inbox refresh.');
-          refreshInbox();
-        }, 500); // Add a 500ms delay before refreshing
-      }
-    };
+      // Return false for older browsers
+      return false;
+    });
+    
+    // Also prevent mousedown and mouseup from bubbling
+    deleteButton.addEventListener('mousedown', function(event) {
+      event.stopPropagation();
+    });
+    
+    deleteButton.addEventListener('mouseup', function(event) {
+      event.stopPropagation();
+    });
     
     header.appendChild(deleteButton);
     groupElement.appendChild(header);
@@ -838,7 +1736,14 @@ function displayEmails(threads) {
 function extractMessageIds(emails) {
   const messageIds = [];
   
+  if (!emails || !Array.isArray(emails)) {
+    console.warn('extractMessageIds: Invalid emails data:', emails);
+    return messageIds;
+  }
+  
   emails.forEach(email => {
+    console.log("Processing email for ID extraction:", email);
+    
     // If it's a thread with messages array
     if (email.messages && Array.isArray(email.messages)) {
       email.messages.forEach(message => {
@@ -849,6 +1754,10 @@ function extractMessageIds(emails) {
     }
     // If it has a direct id property
     else if (email.id) {
+      messageIds.push(email.id);
+    }
+    // Gmail API format - if it's a thread ID
+    else if (typeof email === 'object' && email.id) {
       messageIds.push(email.id);
     }
   });
@@ -1301,7 +2210,7 @@ function testExtensionConnectivity() {
               updateStatus();
             });
           });
-        } catch (e) {
+  } catch (e) {
           results.push(`❌ Error sending ping: ${e.message}`);
           updateStatus();
         }
@@ -1326,88 +2235,321 @@ function testExtensionConnectivity() {
 // Add the test function to the global scope for debugging
 window.testEmailCleanerExtension = testExtensionConnectivity;
 
-// Function to refresh Gmail inbox by forcing DOM repaint
+// Add this debug logging function at the top of the file (after existing imports/declarations)
+function debugLogObject(label, obj) {
+  console.log(`=== DEBUG ${label} ===`);
+  console.log("Type:", typeof obj);
+  console.log("toString:", String(obj));
+  
+  if (obj === null) {
+    console.log("Value: null");
+    return;
+  }
+  
+  if (obj === undefined) {
+    console.log("Value: undefined");
+    return;
+  }
+  
+  try {
+    console.log("JSON.stringify:", JSON.stringify(obj));
+  } catch (e) {
+    console.log("Cannot stringify:", e.message);
+  }
+  
+  // For error objects
+  if (obj instanceof Error) {
+    console.log("name:", obj.name);
+    console.log("message:", obj.message);
+    console.log("stack:", obj.stack);
+  }
+  
+  // Show all properties
+  console.log("Properties:");
+  try {
+    Object.getOwnPropertyNames(obj).forEach(prop => {
+      try {
+        console.log(`- ${prop}:`, obj[prop]);
+      } catch (e) {
+        console.log(`- ${prop}: [Error accessing: ${e.message}]`);
+      }
+    });
+  } catch (e) {
+    console.log("Error listing properties:", e.message);
+  }
+  console.log("=== END DEBUG ===");
+}
+
+// Update the deleteWithPortConnection function for more aggressive flag management
+function deleteWithPortConnection(ids, deleteButton, groupElement, groupsContainer) {
+  // Check if we have valid message IDs
+  if (!ids || ids.length === 0) {
+    console.error("No valid message IDs provided to deleteWithPortConnection");
+    if (deleteButton) {
+      deleteButton.textContent = 'Delete All';
+      deleteButton.disabled = false;
+    }
+    createNotification("No valid message IDs found to delete");
+    return;
+  }
+  
+  console.log(`Deleting ${ids.length} messages:`, ids);
+  
+  let port = null;
+  let portTimeout = null;
+  let lastProgressMessage = 'Starting...';
+  let operationCompleted = false;
+
+  try {
+    // Set the global flag to prevent panel closing
+    window.isDeleteOperationInProgress = true; // Access as window property for extra visibility
+    isDeleteOperationInProgress = true;
+    console.log('⚠️ DELETION STARTED: Setting flag to prevent panel close');
+    
+    // Make absolutely sure panel is re-rendered to capture flag
+    const panel = document.getElementById('email-cleaner-panel');
+    if (panel) {
+      panel.setAttribute('data-deleting', 'true');
+    }
+    
+    createNotification('Connecting to Gmail...');
+    
+    port = chrome.runtime.connect({ name: 'gmail_deletion' });
+    
+    // Listen for messages
+    port.onMessage.addListener((response) => {
+      console.log('[Port Listener] Message:', response);
+      // Reset timeout on any message activity
+      clearTimeout(portTimeout);
+      startPortTimeout(); 
+      
+      switch (response.type) {
+        case 'ACKNOWLEDGED':
+          lastProgressMessage = 'Request received by background...';
+          createNotification(lastProgressMessage);
+          break;
+        case 'AUTH_SUCCESS':
+          lastProgressMessage = 'Authenticated. Initializing...';
+          createNotification(lastProgressMessage);
+          break;
+        case 'DELETE_PROGRESS':
+          lastProgressMessage = response.message || 'Processing...';
+          createNotification(lastProgressMessage);
+          break;
+        case 'DELETE_SUCCESS':
+          operationCompleted = true;
+          cleanupAndFinish(null, response.count);
+          break;
+        case 'ERROR':
+          operationCompleted = true;
+          cleanupAndFinish(response.error || 'Unknown error');
+          break;
+        default:
+           console.warn('[Port Listener] Unknown message type:', response.type);
+      }
+    });
+    
+    // Handle disconnection
+    port.onDisconnect.addListener(() => {
+      console.log('[Port Disconnect] Port disconnected.');
+      clearTimeout(portTimeout);
+      // Only show error if the operation wasn't explicitly completed
+      if (!operationCompleted) {
+        const errorMsg = chrome.runtime.lastError ? 
+            `Connection lost: ${chrome.runtime.lastError.message}` : 
+            'Connection lost unexpectedly.';
+        deleteFailed(errorMsg + ` (Last status: ${lastProgressMessage})`);
+      }
+      port = null; // Ensure port is marked as null
+    });
+    
+    // Send initial request
+    port.postMessage({
+      type: 'DELETE_EMAILS',
+      service: 'gmail',
+      messageIds: ids
+    });
+    
+    // Start initial timeout
+    startPortTimeout();
+    
+  } catch (error) {
+    console.error('[Port Setup] Error:', error);
+    window.isDeleteOperationInProgress = false;
+    isDeleteOperationInProgress = false;
+    console.log('⚠️ DELETION ERROR: Resetting flag due to error');
+    
+    const panel = document.getElementById('email-cleaner-panel');
+    if (panel) {
+      panel.removeAttribute('data-deleting');
+    }
+    
+    cleanupAndFinish('Failed to connect: ' + error.message);
+  }
+      
+  // Helper to start/reset the inactivity timeout
+  function startPortTimeout() {
+    clearTimeout(portTimeout);
+    portTimeout = setTimeout(() => {
+      console.warn('[Port Timeout] No activity for 60 seconds.');
+      cleanupAndFinish('Operation timed out due to inactivity. Please try again.');
+    }, 60000); // 60 second timeout
+  }
+  
+  // Helper to clean up resources and finalize UI
+  function cleanupAndFinish(error = null, count = 0) {
+    clearTimeout(portTimeout);
+    if (port) {
+      try { port.disconnect(); } catch(e){} 
+      port = null;
+    }
+    
+    // Reset the global flag when operation is complete
+    setTimeout(() => {
+      // Delay flag reset to ensure UI updates first
+      window.isDeleteOperationInProgress = false;
+      isDeleteOperationInProgress = false;
+      console.log('⚠️ DELETION FINISHED: Resetting flag, panel can close now');
+      
+      const panel = document.getElementById('email-cleaner-panel');
+      if (panel) {
+        panel.removeAttribute('data-deleting');
+      }
+    }, 500);
+    
+    if (error) {
+      deleteFailed(error);
+    } else {
+      deleteSuccessful(count);
+    }
+  }
+  
+  // Handler for failed deletion
+  function deleteFailed(message = 'Failed to delete emails.') {
+    console.error('Delete operation failed:', message);
+    createNotification(message);
+    if (deleteButton) {
+      deleteButton.textContent = 'Delete All';
+      deleteButton.disabled = false;
+    }
+  }
+  
+  // Handler for successful deletion
+  function deleteSuccessful(count) {
+    createNotification(`Successfully deleted ${count} email${count !== 1 ? 's' : ''}. Please refresh your inbox to see the changes.`);
+    
+    // Remove this group from the UI if group elements were provided
+    if (groupElement && groupElement.parentNode) {
+      groupElement.parentNode.removeChild(groupElement);
+    }
+    
+    // If no groups left, show message
+    if (groupsContainer && groupsContainer.children.length === 0) {
+      // Replace innerHTML with DOM creation
+      const noEmailsText = document.createElement('p');
+      noEmailsText.textContent = 'No emails remaining';
+      noEmailsText.style.textAlign = 'center';
+      noEmailsText.style.color = '#666';
+      groupsContainer.appendChild(noEmailsText);
+    }
+    
+    // Refresh the inbox without reloading the page
+    refreshInbox();
+  }
+}
+
+// Function to refresh the Gmail inbox without reloading the entire page
 function refreshInbox() {
   if (!isGmail) return; // Only for Gmail
   
-  console.log('[refreshInbox] Attempting refresh via DOM repaint and button click...');
-  createNotification('Refreshing inbox...', 2000);
-  
   try {
-    // Method 1: Force repaint of the email list container
-    let repaintAttempted = false;
-    const listContainers = [
-      document.querySelector('div[gh="tl"] table[role="grid"]'), // Most specific list grid
-      document.querySelector('div[role="main"] table[role="grid"]'), // Main grid
-      document.querySelector('.Cp table[role="grid"]'),           // Grid inside .Cp
-      document.querySelector('.AO table[role="grid"]'),           // Grid inside .AO
-      document.querySelector('div[gh="tl"]')                       // Threadlist container
-    ].filter(el => el && el.offsetParent !== null);
+    console.log('Attempting to refresh Gmail inbox...');
     
-    if (listContainers.length > 0) {
-      console.log(`[refreshInbox] Found ${listContainers.length} potential list containers. Attempting repaint...`);
-      listContainers.forEach((container, index) => {
-        try {
-          // Add a temporary class to trigger style recalculation/repaint
-          const tempClass = 'email-cleaner-refresh-pulse';
-          container.classList.add(tempClass);
-          
-          // Ensure the style exists
-          if (!document.getElementById('email-cleaner-temp-style')) {
-            const style = document.createElement('style');
-            style.id = 'email-cleaner-temp-style';
-            // Minimal style change to trigger repaint
-            style.textContent = `.${tempClass} { opacity: 0.999 !important; }`; 
-            document.head.appendChild(style);
-          }
-          
-          // Remove the class after a short delay
-          setTimeout(() => {
-            container.classList.remove(tempClass);
-            console.log(`[refreshInbox] Repaint forced on container ${index + 1}`);
-            
-            // Clean up the style element after the last container
-            if (index === listContainers.length - 1 && document.getElementById('email-cleaner-temp-style')) {
-              document.head.removeChild(document.getElementById('email-cleaner-temp-style'));
-            }
-          }, 50); 
-        } catch (e) {
-          console.error(`[refreshInbox] Error forcing repaint on container ${index + 1}:`, e);
-        }
-      });
-      repaintAttempted = true;
-    } else {
-      console.log('[refreshInbox] No visible list containers found for repaint.');
-    }
-
-    // Method 2: Click the refresh button as a fallback or additional trigger
-    // Run this slightly after the repaint attempt
-    setTimeout(() => {
-        console.log('[refreshInbox] Attempting refresh button click...');
-        const refreshButtons = document.querySelectorAll('[aria-label="Refresh"], .T-I.nu.T-I-ax7, .asa[role="button"]');
-        let buttonClicked = false;
+    // Method 1: Try to find and click the refresh button
+    const refreshButtons = Array.from(document.querySelectorAll('div[role="button"], button'))
+      .filter(el => {
+        // Find elements that have a refresh icon (using various potential attributes)
+        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+        const dataTooltip = (el.getAttribute('data-tooltip') || '').toLowerCase();
+        const title = (el.getAttribute('title') || '').toLowerCase();
         
-        for (const btn of Array.from(refreshButtons)) {
-          if (btn && btn.offsetParent !== null) {
-            try {
-                btn.click();
-                console.log('[refreshInbox] Clicked refresh button.');
-                buttonClicked = true;
-                // Optionally click again
-                // setTimeout(() => { try { btn.click(); } catch(e){} }, 100);
-                break; // Exit after clicking the first visible button
-            } catch (e) {
-                console.error('[refreshInbox] Error clicking refresh button:', e);
-            }
-          }
-        }
-        if (!buttonClicked) {
-            console.log('[refreshInbox] No visible refresh button found or clicked.');
-        }
-    }, repaintAttempted ? 150 : 50); // Add slight delay if repaint was attempted
-
+        return ariaLabel.includes('refresh') || 
+               dataTooltip.includes('refresh') || 
+               title.includes('refresh') ||
+               ariaLabel.includes('reload') || 
+               dataTooltip.includes('reload') || 
+               title.includes('reload');
+      });
+    
+    if (refreshButtons.length > 0) {
+      console.log('Found refresh button, clicking it...');
+      refreshButtons[0].click();
+      return;
+    }
+    
+    // Method 2: Try to trigger the keyboard shortcut for refresh (u key in Gmail)
+    console.log('No refresh button found, trying keyboard shortcut...');
+    
+    // Focus on the main content area first
+    const contentArea = document.querySelector('div[role="main"]');
+    if (contentArea) {
+      contentArea.focus();
+      
+      // Create and dispatch a keyboard event for the 'u' key (Gmail's refresh shortcut)
+      const refreshEvent = new KeyboardEvent('keydown', {
+        key: 'u',
+        code: 'KeyU',
+        keyCode: 85,
+        which: 85,
+        bubbles: true,
+        cancelable: true
+      });
+      
+      document.activeElement.dispatchEvent(refreshEvent);
+      return;
+    }
+    
+    // Method 3: As a last resort, try to manipulate the URL hash
+    console.log('Trying URL hash manipulation...');
+    const currentHash = window.location.hash;
+    if (currentHash.includes('inbox') || currentHash === '#' || currentHash === '') {
+      // Store current hash
+      const origHash = window.location.hash;
+      
+      // Change hash slightly to trigger a reload
+      window.location.hash = currentHash + '&refresh=' + Date.now();
+      
+      // Set it back after a brief delay
+      setTimeout(() => {
+        window.location.hash = origHash;
+      }, 100);
+    }
+    
   } catch (e) {
-    console.error('[refreshInbox] General error during refresh:', e);
-    createNotification('Could not refresh inbox automatically', 3000);
+    console.error('Error refreshing inbox:', e);
+    // Silently fail - this is just a convenience feature
+  }
+}
+
+// Function to show tab content
+function showTabContent(tabId) {
+  const contentContainer = document.getElementById('email-cleaner-content');
+  contentContainer.innerHTML = ''; // Clear current content
+  
+  switch(tabId) {
+    case 'emails':
+      createEmailsTab(contentContainer);
+      break;
+    case 'subscriptions':
+      createSubscriptionsTab(contentContainer);
+      break;
+    case 'analytics':
+      createAnalyticsTab(contentContainer);
+      break;
+    case 'settings':
+      createSettingsTab(contentContainer);
+      break;
+    default:
+      createEmailsTab(contentContainer);
   }
 }

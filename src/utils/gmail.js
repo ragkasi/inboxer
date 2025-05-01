@@ -286,4 +286,56 @@ export class GmailService {
       return [];
     }
   }
+
+  /**
+   * Fetches Gmail threads based on a search query
+   * @param {string} query - Gmail search query (e.g., "from:example@gmail.com")
+   * @param {number} maxResults - Maximum number of threads to fetch
+   * @returns {Promise<Array>} - Array of thread objects with messages
+   */
+  async fetchThreadsByQuery(query, maxResults = 10) {
+    if (!this.client || !this.initialized) {
+      await this.initialize(this.clientId);
+    }
+    
+    console.log(`[Gmail] Fetching up to ${maxResults} threads with query: ${query}`);
+    
+    try {
+      // List threads matching the query
+      const response = await this.client.users.threads.list({
+        userId: 'me',
+        q: query,
+        maxResults: maxResults
+      });
+      
+      if (!response.data.threads || response.data.threads.length === 0) {
+        console.log('[Gmail] No threads found for query');
+        return [];
+      }
+      
+      console.log(`[Gmail] Found ${response.data.threads.length} threads, fetching details`);
+      
+      // Get detailed thread data for each thread ID
+      const threads = await Promise.all(
+        response.data.threads.map(async thread => {
+          try {
+            const threadData = await this.client.users.threads.get({
+              userId: 'me',
+              id: thread.id
+            });
+            return threadData.data;
+          } catch (e) {
+            console.error(`[Gmail] Error fetching thread ${thread.id}:`, e);
+            return null;
+          }
+        })
+      );
+      
+      // Filter out any null results from errors
+      return threads.filter(thread => thread !== null);
+    } catch (error) {
+      console.error('[Gmail] Error fetching threads by query:', error);
+      throw error;
+    }
+  }
 }
